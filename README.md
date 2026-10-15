@@ -184,10 +184,10 @@ reviewers:
 | `{promptArg}` | `--` followed by the prompt — the codex-native shape |
 | `{extra}` | `extraArgs` |
 
-A preset with `promptReplacesRange: true` (codex) drops the range flags once a prompt is
-supplied, because that CLI refuses `[PROMPT]` together with
-`--uncommitted`/`--base`/`--commit`. Every other template keeps its range flags *and* the
-prompt.
+A reviewer is treated as **native** — the prompt replaces the range — when its preset declares
+`promptReplacesRange: true` (codex) **or** its template contains `{promptArg}`: those CLIs
+refuse `[PROMPT]` together with `--uncommitted`/`--base`/`--commit`, and a custom wrapper around
+codex is written exactly that way. Every other template keeps its range flags *and* the prompt.
 
 ### `llm` reviewers
 

@@ -731,5 +731,34 @@ console.log('\nH. 回归');
 	check('H 大 diff 下 prompt 参数受限于 maxArgBytes', Buffer.byteLength(promptArg, 'utf8') <= 96 * 1024, `${Buffer.byteLength(promptArg, 'utf8')}`);
 }
 
+{
+	// 回归：自定义的 codex 形状模板（{range} + {promptArg}）要与内置预设同样处理，
+	// 不能同时收到范围开关和 PROMPT。
+	const custom = [{ id: 'wrapper', kind: 'cli', preset: 'custom', executable: 'codex-wrapper', command: ['{exe}', 'review', '{range}', '{reportArg}', '{extra}', '{promptArg}'], capture: 'report' }];
+	const focus = await loadPlugin({ plugin: { reviewers: custom }, harness: { ...GIT, report: '结论' } });
+	await run(focus, { instructions: '只看并发' });
+	const focusArgv = focus.state.spawns.find((spec) => spec.argv[0] === '/fake/codex-wrapper').argv;
+	check('H 自定义 codex 形状：有 PROMPT 时不带范围开关', !focusArgv.some((token) => ['--uncommitted', '--base', '--commit'].includes(token)), JSON.stringify(focusArgv));
+	check('H 自定义 codex 形状：PROMPT 用 -- 终止符', focusArgv.at(-2) === '--' && focusArgv.at(-1) === '只看并发', JSON.stringify(focusArgv.slice(-3)));
+
+	const scoped = await loadPlugin({
+		plugin: { reviewers: custom, modes: { deep: { strength: 'deep' } }, defaultMode: 'deep' },
+		harness: { ...GIT, report: '结论' },
+	});
+	await run(scoped, { commit: 'abc123' });
+	const scopedArgv = scoped.state.spawns.find((spec) => spec.argv[0] === '/fake/codex-wrapper').argv;
+	check('H 自定义 codex 形状：有范围时保留范围且不传 PROMPT', scopedArgv.includes('--commit') && scopedArgv.includes('abc123') && !scopedArgv.includes('--'), JSON.stringify(scopedArgv));
+}
+{
+	// 回归：非 codex 形状的自定义模板（{prompt}）仍然「范围 + 提示词」都给。
+	const h = await loadPlugin({
+		plugin: { reviewers: [{ id: 'p', kind: 'cli', preset: 'custom', executable: 'plain', command: ['{exe}', '{range}', '{prompt}'], capture: 'stdout' }] },
+		harness: { ...GIT, stdout: '结论' },
+	});
+	await run(h, { base: 'main' });
+	const argv = h.state.spawns.find((spec) => spec.argv[0] === '/fake/plain').argv;
+	check('H 普通自定义模板保留范围与提示词', argv.includes('--base') && argv.includes('main') && argv.at(-1).includes('评审任务'), JSON.stringify(argv.slice(0, 4)));
+}
+
 console.log(`\n${passes} 项通过，${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

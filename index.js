@@ -296,10 +296,13 @@ export function apply(ctx, config) {
 							const briefText = flattenBrief(brief);
 							const scopeGiven = target.base.length > 0 || target.commit.length > 0;
 
-							// codex 的 PROMPT 与范围开关互斥，而范围不能丢：有 base/commit 时
-							// 不传模式的提示词（范围优先），并在报告里说明这件事。
-							if (scopeGiven && nativePrompt !== undefined && reviewers.some((reviewer) => reviewer.promptReplacesRange)) {
-								changes.notes.push('codex：因为指定了 base/commit，模式的提示词没有传递（codex CLI 的 PROMPT 与范围开关互斥）；需要「范围 + 关注点」请把关注点写进模式的 prompt 之外，或改用 llm/subagent 评审者。');
+							// 只进报告脚注、不进评审者提示词：这条是给读结论的人看的。
+							const reportNotes = [...changes.notes];
+							const rangeFirst = reviewers.filter((reviewer) => reviewer.promptReplacesRange);
+							if (scopeGiven && nativePrompt !== undefined && rangeFirst.length > 0) {
+								reportNotes.push(
+									`${rangeFirst.map((reviewer) => reviewer.id).join('、')}：因为指定了 base/commit，模式的提示词没有传递——该 CLI 的 PROMPT 与范围开关互斥，而范围优先。需要「范围 + 关注点」请改用 llm / subagent 评审者。`,
+								);
 							}
 
 							const outcomes = await Promise.all(
@@ -342,12 +345,12 @@ export function apply(ctx, config) {
 							const status = completed > 0 ? 'completed' : 'failed';
 							const detail = `${completed}/${outcomes.length} 个评审者完成`;
 
-							const draft = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, notes: changes.notes, warnings: settings.warnings });
+							const draft = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, notes: reportNotes, warnings: settings.warnings });
 							const truncation = truncateText(draft, settings.maxResultChars);
 							let shown = draft;
 							if (truncation.truncated) {
 								// 只有截断时才需要把全文留在盘上：结果里给出了路径，不能删。
-								const full = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, reportPath, truncated: true, notes: changes.notes, warnings: settings.warnings });
+								const full = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, reportPath, truncated: true, notes: reportNotes, warnings: settings.warnings });
 								await writeFile(reportPath, full, 'utf8').catch(() => undefined);
 								shown = `${truncateText(full, settings.maxResultChars).text}\n\n[报告已截断；完整报告：${reportPath}]`;
 							} else {

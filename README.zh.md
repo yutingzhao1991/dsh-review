@@ -175,9 +175,10 @@ reviewers:
 | `{promptArg}` | `--` 加提示词 —— codex 的原生形态 |
 | `{extra}` | `extraArgs` |
 
-声明了 `promptReplacesRange: true` 的预设（codex）一旦拿到提示词就去掉范围开关，因为那个 CLI
-不允许 `[PROMPT]` 与 `--uncommitted`/`--base`/`--commit` 同时出现。其他模板既保留范围开关，
-也保留提示词。
+预设声明了 `promptReplacesRange: true`（codex）**或**模板里带 `{promptArg}` 时，评审者按
+**原生**形态处理：一旦拿到提示词就去掉范围开关，因为这类 CLI 不允许 `[PROMPT]` 与
+`--uncommitted`/`--base`/`--commit` 同时出现——自定义的 codex 包装脚本正是这么写的。其他模板
+既保留范围开关，也保留提示词。
 
 ### `llm` 评审者
 
