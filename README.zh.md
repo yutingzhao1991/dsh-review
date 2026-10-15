@@ -141,6 +141,13 @@ review({ instructions: "只看并发与错误处理" })
 拿到的是一个 **diff 包** —— 变更统计、`git status`、完整 patch、未跟踪新文件的正文 —— 因为
 它们自己不认识 git。
 
+因为 codex CLI 不接受范围开关旁边的 `[PROMPT]`，**范围永远优先**：指定了 `base`/`commit` 时，
+模式的提示词就不传给 codex（报告脚注会写明这件事），而不是悄悄把范围丢掉。
+
+未跟踪的新文件只算进**未提交**这个范围。对 `base`/`commit` 来说，它们既不在
+`git diff <base>` 里也不在 `git show <commit>` 里，所以既不进材料也不进变更规模，只留一条
+说明。
+
 `custom` 评审者就是一个模板加占位符：
 
 ```yaml
@@ -159,7 +166,7 @@ reviewers:
 | 占位符 | 展开成 |
 | --- | --- |
 | `{exe}` | 解析出来的可执行文件 |
-| `{range}` | `--uncommitted` / `--base <ref>` / `--commit <sha>`（有原生 PROMPT 时为空） |
+| `{range}` | `--uncommitted` / `--base <ref>` / `--commit <sha>`（该预设允许 PROMPT 取代范围时为空） |
 | `{model}` | 预设的模型开关 + 模型 id（没配模型时为空） |
 | `{ephemeral}` | `--ephemeral` |
 | `{report}` | 让评审者写结论的文件路径 |
@@ -168,8 +175,9 @@ reviewers:
 | `{promptArg}` | `--` 加提示词 —— codex 的原生形态 |
 | `{extra}` | `extraArgs` |
 
-模板里带 `{promptArg}` 会被当成**原生**形态：一旦给了提示词，范围开关就会被去掉，因为
-codex CLI 不允许 `[PROMPT]` 与 `--uncommitted`/`--base`/`--commit` 同时出现。
+声明了 `promptReplacesRange: true` 的预设（codex）一旦拿到提示词就去掉范围开关，因为那个 CLI
+不允许 `[PROMPT]` 与 `--uncommitted`/`--base`/`--commit` 同时出现。其他模板既保留范围开关，
+也保留提示词。
 
 ### `llm` 评审者
 
@@ -270,6 +278,7 @@ config:
 | `maxFileDiffChars` | `40000` | 单文件 diff 上限 |
 | `maxDiffFiles` | `60` | 最多这么多个文件进入 diff |
 | `maxUntrackedFileChars` | `20000` | 读取未跟踪新文件时的单文件上限 |
+| `maxArgBytes` | `98304` | 以 `argv` 收提示词的 CLI 评审者的单参数字节上限（Linux 单个参数约 128 KiB；没有这道闸，大 diff 会起不来） |
 | `collectMaxBytes` | `262144` | 评审者 stdout/stderr 的保留字节数（只用于诊断） |
 | `spillMaxBytes` | `8388608` | 上述输出的溢出落盘上限 |
 | `envPassthrough` | `[]` | 额外透传给评审进程的环境变量名（`subprocess` 默认抹掉 `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 形状的名字） |
@@ -391,7 +400,7 @@ node selftest.mjs
 - `base`/`commit` 与 `instructions` 互斥 —— 这是 codex CLI 的限制，被推广到所有评审者，好让
   参数在哪儿都一个意思。要「给某个范围加关注点」请用模式的 `prompt`。
 - 因为 codex 不接受范围开关旁边的 `PROMPT`，模式的提示词只在没给 `base`/`commit` 时才能到达
-  codex；其他 kind 任何时候都能收到。
+  codex。范围本身永远保留，报告里也会写明提示词被跳过；其他 kind 任何时候都能收到。
 - 报告被截断时，全文留在 `$TMPDIR/dsh-review-*/report.md`，不会自动回收；未截断的运行会删掉
   自己的临时目录。
 - codex 只在它的受信任目录里能跑（`~/.codex/config.toml` 的 `[projects.*]`）；插件刻意不传

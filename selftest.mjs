@@ -673,5 +673,63 @@ console.log('\nH. 回归');
 	if (match !== null) rmSync(join(match[1], '..'), { recursive: true, force: true });
 }
 
+{
+	// 回归：指定了 commit/base 时，模式提示词不能让 codex 丢掉范围开关。
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }], modes: { deep: { strength: 'deep', prompt: '彻底看' } }, defaultMode: 'deep' },
+		harness: { ...GIT, report: '结论' },
+	});
+	const value = await run(h, { commit: 'abc123' });
+	const argv = h.state.spawns.find((spec) => spec.argv[0] === '/fake/codex').argv;
+	check('H 有范围时保留 --commit', argv.includes('--commit') && argv.includes('abc123'), JSON.stringify(argv));
+	check('H 有范围时不传 PROMPT', !argv.includes('--'), JSON.stringify(argv));
+	check('H 在报告里说明模式的提示词被跳过', value.report.includes('模式的提示词没有传递'), value.report.slice(-500));
+	check('H 报告头仍标注提交范围', value.report.includes('提交 abc123 的改动'));
+}
+{
+	// 回归：没有范围时，模式提示词照旧走 codex 的 PROMPT。
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }], modes: { deep: { strength: 'deep' } }, defaultMode: 'deep' },
+		harness: { ...GIT, report: '结论' },
+	});
+	await run(h, {});
+	const argv = h.state.spawns.find((spec) => spec.argv[0] === '/fake/codex').argv;
+	check('H 无范围时用 PROMPT 取代范围开关', argv.includes('--') && !argv.some((token) => ['--base', '--commit'].includes(token)), JSON.stringify(argv));
+	check('H 无范围时 PROMPT 里带模式强度', argv.at(-1).includes('深度评审'), argv.at(-1));
+}
+{
+	// 回归：commit 范围不把当前未跟踪文件算进材料，也不算进变更规模。
+	const calls = [];
+	const h = await loadPlugin({
+		plugin: { models: [{ provider: 'bainian', model: 'qwen3.8-max' }] },
+		harness: { ...GIT, services: { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } } },
+	});
+	const value = await run(h, { commit: 'abc123' });
+	const prompt = calls[0].messages[0].content[0].text;
+	check('H commit 范围不含未跟踪正文', !prompt.includes('export const b = 2;'), prompt.slice(-400));
+	check('H commit 范围不虚增变更规模', value.report.includes('1 个文件'), value.report.slice(0, 300));
+	check('H 未跟踪文件被说明为范围外', value.report.includes('不属于本次范围'), value.report.slice(-400));
+}
+{
+	// 回归：argv 投递的提示词要按 UTF-8 字节压到单参数上限内。
+	const { clampForArgv } = await import(new URL('./lib/reviewers.js', import.meta.url).href);
+	const short = clampForArgv('abc', 100);
+	check('H 未超限时原样返回', short.text === 'abc' && short.clamped === false);
+	const longText = `${'开头'.repeat(200)}${'中'.repeat(2000)}${'尾'.repeat(200)}`;
+	const clamped = clampForArgv(longText, 1024);
+	check('H 超限时被截断', clamped.clamped === true && Buffer.byteLength(clamped.text, 'utf8') <= 1024, `${Buffer.byteLength(clamped.text, 'utf8')}`);
+	check('H 截断给出标记', clamped.text.includes('单参数上限'));
+	check('H 截断不切碎多字节字符', !clamped.text.includes('\uFFFD'));
+
+	// 端到端：一个巨大的 diff 也不会让 argv 超限。
+	const huge = `diff --git a/big.js b/big.js\n@@ -1 +1 @@\n+${'中文'.repeat(80_000)}\n`;
+	const script = defaultGitScript(WORK).map((entry) => (entry.argv.join(' ').endsWith('diff --no-color') ? { ...entry, stdout: huge } : entry));
+	const big = await loadPlugin({ plugin: { agents: [{ preset: 'claude' }] }, harness: { ...GIT, gitScript: script, stdout: '结论' } });
+	await run(big, {});
+	const spec = big.state.spawns.find((entry) => entry.argv[0] === '/fake/claude');
+	const promptArg = spec.argv.at(-1);
+	check('H 大 diff 下 prompt 参数受限于 maxArgBytes', Buffer.byteLength(promptArg, 'utf8') <= 96 * 1024, `${Buffer.byteLength(promptArg, 'utf8')}`);
+}
+
 console.log(`\n${passes} 项通过，${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

@@ -149,6 +149,14 @@ review({ instructions: "only concurrency and error handling" })
 does not feed it a diff. Every other preset gets a *diff packet* — change stat, `git status`,
 the full patch, and the text of untracked new files — because it has no git awareness of its own.
 
+Because the codex CLI refuses a `[PROMPT]` next to a range flag, **a range always wins**: when
+`base`/`commit` is set, the mode's prompt is not handed to codex (and the report's footnotes
+say so) instead of the scope being silently dropped.
+
+Untracked new files count as part of the change only for the **uncommitted** scope. For
+`base`/`commit` they belong to neither `git diff <base>` nor `git show <commit>`, so they are
+left out of the material and the change size, with a note saying so.
+
 A `custom` reviewer is a template plus placeholders:
 
 ```yaml
@@ -167,7 +175,7 @@ reviewers:
 | Placeholder | Expands to |
 | --- | --- |
 | `{exe}` | the resolved executable |
-| `{range}` | `--uncommitted` / `--base <ref>` / `--commit <sha>` (empty when a native prompt is present) |
+| `{range}` | `--uncommitted` / `--base <ref>` / `--commit <sha>` (empty when this preset lets the prompt replace the range) |
 | `{model}` | the preset's model flag plus the model id (empty when no model) |
 | `{ephemeral}` | `--ephemeral` |
 | `{report}` | the path the reviewer should write its conclusion to |
@@ -176,9 +184,10 @@ reviewers:
 | `{promptArg}` | `--` followed by the prompt — the codex-native shape |
 | `{extra}` | `extraArgs` |
 
-A template containing `{promptArg}` is treated as **native**: once a prompt is supplied the
-range flags are dropped, because the codex CLI refuses `[PROMPT]` together with
-`--uncommitted`/`--base`/`--commit`.
+A preset with `promptReplacesRange: true` (codex) drops the range flags once a prompt is
+supplied, because that CLI refuses `[PROMPT]` together with
+`--uncommitted`/`--base`/`--commit`. Every other template keeps its range flags *and* the
+prompt.
 
 ### `llm` reviewers
 
@@ -283,6 +292,7 @@ Every key is optional; defaults live in `lib/settings.js`.
 | `maxFileDiffChars` | `40000` | per-file diff cap |
 | `maxDiffFiles` | `60` | at most this many files enter the diff |
 | `maxUntrackedFileChars` | `20000` | per-file cap when reading untracked new files |
+| `maxArgBytes` | `98304` | single-argument byte cap for CLI reviewers that receive the prompt through `argv` (Linux allows ~128 KiB per argument; without this, a large diff fails to spawn) |
 | `collectMaxBytes` | `262144` | retained bytes of reviewer stdout/stderr (diagnostics only) |
 | `spillMaxBytes` | `8388608` | spill-file cap for that output |
 | `envPassthrough` | `[]` | extra environment variables to forward to reviewer processes (the subprocess service scrubs `KEY`/`PASSWORD`/`SECRET`/`TOKEN`-shaped names) |
@@ -416,8 +426,9 @@ node selftest.mjs
 - `base`/`commit` and `instructions` are mutually exclusive — a codex CLI constraint applied
   to every reviewer so the parameters mean the same thing everywhere. Use a mode's `prompt`
   to attach focus to a range.
-- Because codex refuses a `PROMPT` next to a range flag, a mode prompt reaches codex only when
-  no `base`/`commit` is given; other kinds always receive it.
+- Because codex refuses a `PROMPT` next to a range flag, a mode's prompt reaches codex only
+  when no `base`/`commit` is given. The range itself is always preserved, and the report notes
+  when the prompt was skipped; every other reviewer kind always receives it.
 - When a report is truncated, the full text stays in `$TMPDIR/dsh-review-*/report.md` and is
   never garbage-collected. Non-truncated runs delete their temp directory.
 - codex only runs inside its trusted directories (`~/.codex/config.toml` → `[projects.*]`);

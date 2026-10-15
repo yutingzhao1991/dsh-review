@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { collectChanges, describeCall, describeTarget } from './lib/changes.js';
 import { buildBrief, buildNativePrompt, buildPolicyText, buildSynthesisPrompt, flattenBrief } from './lib/prompt.js';
 import { composeReport, truncateText } from './lib/report.js';
-import { runReviewer } from './lib/reviewers.js';
+import { clampForArgv, runReviewer } from './lib/reviewers.js';
 import { needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
 
 /** 加载器诊断用的插件名；`cordis.patch.yml` 里的 id 是 `review`。 */
@@ -285,8 +285,8 @@ export function apply(ctx, config) {
 
 							// 没有改动就不要打扰评审者：多花几分钟、还容易换来一堆幻觉 findings。
 							const gitBroke = changes.notes.some((note) => note.includes('失败'));
-							if (changes.isRepo && !gitBroke && changes.summary.files === 0 && changes.status.trim().length === 0) {
-								const empty = ['## 评审范围', '', `- 范围：${describeTarget(target)}`, '- 未检测到需要评审的改动（暂存区、工作区与未跟踪文件都是干净的）。'].join('\n');
+							if (changes.isRepo && !gitBroke && changes.summary.empty) {
+								const empty = ['## 评审范围', '', `- 范围：${describeTarget(target)}`, '- 未检测到需要评审的改动（该范围内没有文件变化）。'].join('\n');
 								job.append(empty, { channel: 'stdout' });
 								return { status: 'completed', detail: '没有改动' };
 							}
@@ -294,10 +294,24 @@ export function apply(ctx, config) {
 							const brief = buildBrief({ settings, mode, target, changes, extraNotes: changes.notes });
 							const nativePrompt = buildNativePrompt(mode, target);
 							const briefText = flattenBrief(brief);
+							const scopeGiven = target.base.length > 0 || target.commit.length > 0;
+
+							// codex 的 PROMPT 与范围开关互斥，而范围不能丢：有 base/commit 时
+							// 不传模式的提示词（范围优先），并在报告里说明这件事。
+							if (scopeGiven && nativePrompt !== undefined && reviewers.some((reviewer) => reviewer.promptReplacesRange)) {
+								changes.notes.push('codex：因为指定了 base/commit，模式的提示词没有传递（codex CLI 的 PROMPT 与范围开关互斥）；需要「范围 + 关注点」请把关注点写进模式的 prompt 之外，或改用 llm/subagent 评审者。');
+							}
 
 							const outcomes = await Promise.all(
-								reviewers.map((reviewer, index) =>
-									runReviewer(ctx, reviewer, {
+								reviewers.map((reviewer, index) => {
+									// 以 argv 投递提示词的评审者要过单参数字节闸，stdin 投递不受限。
+									let promptText;
+									if (reviewer.kind === 'cli') {
+										if (reviewer.promptReplacesRange) promptText = scopeGiven ? undefined : nativePrompt;
+										else if (reviewer.promptVia === 'stdin') promptText = briefText;
+										else promptText = clampForArgv(briefText, settings.maxArgBytes).text;
+									}
+									return runReviewer(ctx, reviewer, {
 										cwd,
 										target,
 										brief,
@@ -305,12 +319,10 @@ export function apply(ctx, config) {
 										settings,
 										agent: exec.agent,
 										signal: controller.signal,
-										// codex 走原生 review 子命令（模板里的 {promptArg}）：它自己读仓库，只收 PROMPT；
-										// 其他 CLI 预设只能收一段文本，就喂完整的评审包。
-										promptText: reviewer.kind !== 'cli' ? undefined : reviewer.command.includes('{promptArg}') ? nativePrompt : briefText,
+										promptText,
 										reportPath: reviewer.capture === 'report' ? join(workdir, `report-${safeFileName(reviewer.id, index)}.md`) : reportPath,
-									}),
-								),
+									});
+								}),
 							);
 
 							// 可选的汇总：把多份结论合并、去重、标注共识。
