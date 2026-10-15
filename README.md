@@ -37,6 +37,7 @@ flowchart LR
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Three kinds of reviewer](#three-kinds-of-reviewer)
+- [Model discovery](#model-discovery)
 - [Review modes](#review-modes)
 - [Configuration reference](#configuration-reference)
 - [How one call runs](#how-one-call-runs)
@@ -208,6 +209,43 @@ models:
 The stream is consumed by the plugin directly (`text-delta` chunks plus the terminal
 `finish`), so no `@deepseek-ai/dsh-llm` import and no version coupling.
 
+#### Where the model list comes from
+
+**DSH's provider configuration, never this plugin.** A reviewer only ever *references* a
+`provider` + `model` by name; endpoints, credentials, context windows and image support all
+stay in your DSH config (`dsh-llm-pi-ai`, `dsh-llm-deepseek`, …). The plugin holds no API key,
+no `baseURL`, and no `fetch`.
+
+That means you don't have to re-declare every model here. Two ways to use what DSH already has:
+
+```js
+review({ reviewers: ["bailian/kimi-k3"] })   // name any registered model directly
+review({ reviewers: ["kimi-k3"] })           // bare model id, when it is unambiguous
+```
+
+`provider/model` naming is on by default (`discover.adHoc`). The plugin asks `ctx.llm` whether
+that route exists before using it, so an unregistered name fails loudly instead of silently
+falling back — the error lists what DSH *does* have.
+
+To go further and have a provider's models show up as first-class reviewers, turn on
+discovery:
+
+```yaml
+config:
+  discover:
+    providers: [ bailian ]                  # scoping key: writing it turns discovery on
+    exclude: [ "*embedding*", "*rerank*" ]  # never expanded, and refused ad hoc
+    include: [ "qwen*", "glm*" ]            # optional allowlist
+    label: "{providerName}/{model}"         # {provider} {providerName} {model} {name}
+    inDefault: false                        # keep them out of the default set
+    adHoc: true                             # allow provider/model naming
+```
+
+Discovered reviewers are named `provider/model`, get the label from `label`, and are marked
+**自动发现** (auto-discovered) in the report; ad-hoc ones are marked **按需指名** (named on
+demand). Resolution happens per call, so adding or removing a model in DSH takes effect
+immediately — there is no stale copy in this plugin to update.
+
 ### `subagent` reviewers
 
 Starts a DSH child agent through `ctx.subagents`. It receives the same review packet in its
@@ -226,6 +264,43 @@ reviewers:
     persona: "You are a meticulous reviewer."
     toolFilter: { ... }                   # passed through to the subagent request
 ```
+
+## Model discovery
+
+The reviewer list and the model list are two different things. This plugin owns only the
+first one:
+
+| | Owner | Examples |
+| --- | --- | --- |
+| **Definition** — endpoint, credential, context window, modalities | your DSH provider config | `bailian` → `baseURL`, `apiKeyEnv: BAILIAN_API_KEY`, `models: [...]` |
+| **Selection** — which ones are reviewers, their ids, labels, defaults | this plugin's `config` | `reviewers: [{ id: qwen, provider: bailian, model: qwen3.8-max }]` |
+
+So the plugin never stores a key, never talks to a provider endpoint, and never has a model
+list that can go stale. `ctx.llm.listProviders()` / `listModels(provider)` are the only source
+of truth, queried per call.
+
+| `discover` key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | follows the scoping keys | expand discovered models into reviewers |
+| `providers` | all registered | which providers to expand (a scoping key: writing it enables discovery) |
+| `include` | `[]` | allowlist globs, matched against `provider/model` **and** the bare model id |
+| `exclude` | `[]` | denylist globs — never expanded, and refused when named ad hoc |
+| `label` | `{model}` | label template: `{provider}`, `{providerName}`, `{model}`, `{name}` |
+| `inDefault` | `false` | whether discovered reviewers join the default set |
+| `adHoc` | `true` | allow `reviewers: ["bailian/kimi-k3"]` without any config entry |
+| `listModelsTimeoutMs` | `8000` | per-provider budget for fetching the model list; a slow provider is skipped, not fatal |
+
+Resolution rules, in order:
+
+1. an exact reviewer id from your config;
+2. a bare model id, **if exactly one** reviewer uses it (ambiguous names are never guessed);
+3. `provider/model`, if `adHoc` is on and DSH actually registers that route.
+
+Nothing is invented: a name that matches none of these produces an error listing the
+configured reviewers *and* the models DSH has registered right now.
+
+If your config contains **only** `discover` and no static reviewers, the discovered set
+becomes the default — otherwise "call `review()` with no arguments" would mean nothing.
 
 ## Review modes
 
@@ -280,6 +355,7 @@ Every key is optional; defaults live in `lib/settings.js`.
 | `agents` | `[]` | shorthand list of `cli` reviewers; `id` defaults to the preset name |
 | `models` | `[]` | shorthand list of `llm` reviewers; `id` defaults to the model name |
 | `reviewers` | `[]` | full reviewer definitions (see below); wins over a shorthand with the same id |
+| `discover` | `{ enabled: false, adHoc: true, … }` | pull models straight from DSH's provider config instead of re-declaring them (see [Model discovery](#model-discovery)) |
 | `defaultReviewers` | all enabled | reviewer ids used when the tool call does not pass `reviewers` |
 | `defaultMode` | none | mode applied when the tool call does not pass `mode` |
 | `modes` | `{}` | named review modes |
@@ -314,6 +390,12 @@ used (`preset`/`executable`/`command` → `cli`, `provider` → `llm`, `subagent
     defaultReviewers: [ codex, qwen ]
     defaultMode: balanced
     injectPolicy: true
+
+    # Pull models straight from DSH instead of re-declaring them here.
+    discover:
+      providers: [ bailian ]
+      exclude: [ "*embedding*", "*rerank*" ]
+      adHoc: true
 
     agents:
       - preset: codex
@@ -367,7 +449,8 @@ used (`preset`/`executable`/`command` → `cli`, `provider` → `llm`, `subagent
 
 1. **Validate** — `base` / `commit` / `instructions` are mutually exclusive, ranges may not
    start with `-` (git would read them as flags), `reviewers` must be a string array.
-2. **Resolve** — mode → reviewer set → working directory (`exec.agent.session.header.cwd`).
+2. **Resolve** — mode → reviewer set (config entries, plus discovery and ad-hoc names when
+   enabled) → working directory (`exec.agent.session.header.cwd`).
 3. **Collect** — always: `git status --porcelain -z -uall` and `--numstat`. Only when a
    selected reviewer needs it: the full patch and the contents of untracked files, trimmed to
    the configured budget with an explicit note about what was omitted.
@@ -397,7 +480,7 @@ The tool result is a small canonical object; the UI shows it as a terminal card 
 ## Self-test
 
 `selftest.mjs` drives the plugin with a fake `ctx`: no host process, no real codex, no real
-model. 100+ assertions cover config normalization, all three reviewer kinds, git collection,
+model. 150+ assertions cover config normalization, all three reviewer kinds, git collection,
 orchestration, synthesis, truncation, and the regressions found by this plugin's own first
 real review.
 
@@ -434,6 +517,10 @@ node selftest.mjs
 - codex only runs inside its trusted directories (`~/.codex/config.toml` → `[projects.*]`);
   the plugin deliberately does not pass `--skip-git-repo-check`, because that trust gate is
   codex's to open, not ours.
+- Discovered and ad-hoc reviewers are resolved at call time, so a model you delete from DSH
+  disappears from the reviewer set on the next call (that is the point — no stale copy).
+- `discover` expands whatever `listModels()` reports. A provider that reports hundreds of
+  models will make the tool description and default set unwieldy; use `include`/`exclude`.
 - `when` is a system-prompt statement of policy, not an enforcement gate.
 
 ## License

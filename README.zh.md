@@ -36,6 +36,7 @@ flowchart LR
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [三种评审者](#三种评审者)
+- [模型发现](#模型发现)
 - [评审模式](#评审模式)
 - [配置项](#配置项)
 - [一次调用是怎么跑的](#一次调用是怎么跑的)
@@ -198,6 +199,38 @@ models:
 流由插件自己消费（`text-delta` 分片 + 终态 `finish`），因此不需要 import
 `@deepseek-ai/dsh-llm`，也就不会被它的版本连坐。
 
+#### 模型列表来自哪里
+
+**来自 DSH 的 provider 配置，不是这个插件。** 评审者只是按名字**引用** `provider` + `model`；
+端点、密钥、上下文窗口、是否支持图片，全都留在你的 DSH 配置里（`dsh-llm-pi-ai`、
+`dsh-llm-deepseek`……）。插件里没有 API key、没有 `baseURL`、没有 `fetch`。
+
+所以你不必在这里把每个模型再抄一遍，两种用法直接拿 DSH 里已有的：
+
+```js
+review({ reviewers: ["bailian/kimi-k3"] })   // 直接指名任意已注册模型
+review({ reviewers: ["kimi-k3"] })           // 裸模型名，唯一时可用
+```
+
+`provider/model` 指认默认就是开的（`discover.adHoc`）。用之前插件会先问 `ctx.llm` 这条路由
+是否真的存在，所以写错名字会明确报错、并列出 DSH 当前有什么，不会静默回退。
+
+想让某个 provider 的模型直接变成一等公民式的评审者，打开模型发现：
+
+```yaml
+config:
+  discover:
+    providers: [ bailian ]                  # 范围键：写了就自动打开发现
+    exclude: [ "*embedding*", "*rerank*" ]  # 既不展开，也禁止按需指名
+    include: [ "qwen*", "glm*" ]            # 可选白名单
+    label: "{providerName}/{model}"         # {provider} {providerName} {model} {name}
+    inDefault: false                        # 不让它们进默认集合
+    adHoc: true                             # 允许 provider/model 指认
+```
+
+发现出来的评审者 id 是 `provider/model`，标签按 `label` 渲染，报告里标 **自动发现**；按需指名的
+标 **按需指名**。解析发生在每次调用，所以 DSH 那边加/删模型立刻生效——插件里没有会过期的副本。
+
 ### `subagent` 评审者
 
 通过 `ctx.subagents` 起一个 DSH 子智能体。它提示词里拿到同一份评审包，**同时保留自己的
@@ -215,6 +248,40 @@ reviewers:
     persona: "你是一名一丝不苟的评审者。"
     toolFilter: { ... }                   # 原样传给子智能体请求
 ```
+
+## 模型发现
+
+「有哪些评审者」和「有哪些模型」是两件事，这个插件只管前者：
+
+| | 归属 | 例子 |
+| --- | --- | --- |
+| **定义** —— 端点、密钥、上下文窗口、模态 | 你的 DSH provider 配置 | `bailian` → `baseURL`、`apiKeyEnv: BAILIAN_API_KEY`、`models: [...]` |
+| **选用** —— 哪几个当评审者、id、标签、默认集合 | 本插件的 `config` | `reviewers: [{ id: qwen, provider: bailian, model: qwen3.8-max }]` |
+
+所以插件里既没有密钥、也不会去连 provider 端点，更不存在一份会过期的模型清单。
+`ctx.llm.listProviders()` / `listModels(provider)` 是唯一事实来源，每次调用现问。
+
+| `discover` 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `enabled` | 跟随范围键 | 是否把发现出来的模型展开成评审者 |
+| `providers` | 全部已注册 | 展开哪些 provider（**范围键**：写了它就会打开发现） |
+| `include` | `[]` | 白名单 glob，对 `provider/model` 与裸 model 都匹配 |
+| `exclude` | `[]` | 黑名单 glob：既不展开，也不允许按需指名 |
+| `label` | `{model}` | 标签模板：`{provider}`、`{providerName}`、`{model}`、`{name}` |
+| `inDefault` | `false` | 发现出来的评审者是否进默认集合 |
+| `adHoc` | `true` | 允许 `reviewers: ["bailian/kimi-k3"]` 这种不在配置里的指名 |
+| `listModelsTimeoutMs` | `8000` | 单个 provider 取模型列表的预算；慢的跳过，不拖垮整次调用 |
+
+解析顺序：
+
+1. 配置里的评审者 id 精确命中；
+2. 裸模型名，**且全局唯一**（重名不猜）；
+3. `provider/model`，前提是 `adHoc` 开着且 DSH 真的注册了这条路由。
+
+不会凭空造模型：三者都不匹配时报错，并同时列出「配置里的评审者」与「DSH 当前已注册的模型」。
+
+如果配置里**只有** `discover`、没有任何静态评审者，那么发现出来的集合就是默认集合——否则
+「不传参数调 `review()`」会变成一个没有意义的空集合。
 
 ## 评审模式
 
@@ -267,6 +334,7 @@ config:
 | `agents` | `[]` | `cli` 评审者简写；`id` 默认取预设名 |
 | `models` | `[]` | `llm` 评审者简写；`id` 默认取模型名 |
 | `reviewers` | `[]` | 完整评审者定义（见下）；同 id 时覆盖简写 |
+| `discover` | `{ enabled: false, adHoc: true, … }` | 直接用 DSH provider 配置里的模型，不必在这里再抄一遍（见[模型发现](#模型发现)） |
 | `defaultReviewers` | 全部启用 | 工具调用没给 `reviewers` 时用的 id 集合 |
 | `defaultMode` | 不设 | 工具调用没给 `mode` 时套的模式 |
 | `modes` | `{}` | 命名评审模式 |
@@ -300,6 +368,12 @@ config:
     defaultReviewers: [ codex, qwen ]
     defaultMode: balanced
     injectPolicy: true
+
+    # 直接用 DSH 里已配好的模型，不必在这里再抄一遍。
+    discover:
+      providers: [ bailian ]
+      exclude: [ "*embedding*", "*rerank*" ]
+      adHoc: true
 
     agents:
       - preset: codex
@@ -353,7 +427,7 @@ config:
 
 1. **校验** —— `base` / `commit` / `instructions` 互斥；范围不能以 `-` 开头（git 会当成
    开关）；`reviewers` 必须是字符串数组。
-2. **解析** —— 模式 → 评审者集合 → 工作目录（`exec.agent.session.header.cwd`）。
+2. **解析** —— 模式 → 评审者集合（配置条目，加上开关打开时的自动发现与按需指名）→ 工作目录（`exec.agent.session.header.cwd`）。
 3. **收集** —— 永远收集：`git status --porcelain -z -uall` 与 `--numstat`。只有选中的评审者
    需要时才收集：完整 patch 与未跟踪新文件正文，按配置预算裁剪，并**明确写出被省略了什么**。
 4. **并发** —— 所有评审者并行跑，各自一个 AbortController 与超时。一个失败不会带倒其他。
@@ -377,7 +451,7 @@ config:
 ## 自测
 
 `selftest.mjs` 用假 `ctx` 驱动插件本体：不起宿主进程，不跑真的 codex，也不真的调模型。
-100+ 条断言覆盖配置归一化、三种评审者、git 收集、编排、汇总、截断，以及本插件第一次真实
+150+ 条断言覆盖配置归一化、三种评审者、git 收集、编排、汇总、截断，以及本插件第一次真实
 评审发现的那几个问题留下的回归用例。
 
 ```sh
@@ -406,6 +480,10 @@ node selftest.mjs
   自己的临时目录。
 - codex 只在它的受信任目录里能跑（`~/.codex/config.toml` 的 `[projects.*]`）；插件刻意不传
   `--skip-git-repo-check` —— 那是 codex 自己的信任闸，不该由这里代开。
+- 自动发现与按需指名都在调用时解析，所以 DSH 里删掉一个模型，下次调用它就不在评审者集合里了
+  （这正是目的：插件里没有过期的副本）。
+- `discover` 展开的是 `listModels()` 报出来的全部内容。如果某个 provider 报了上百个模型，工具
+  描述与默认集合会变得臃肿，请用 `include` / `exclude` 收窄。
 - `when` 是系统提示词里的要求，不是强制闸门。
 
 ## License

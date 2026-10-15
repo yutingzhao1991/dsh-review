@@ -24,10 +24,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { collectChanges, describeCall, describeTarget } from './lib/changes.js';
+import { resolveReviewerSelection } from './lib/discovery.js';
 import { buildBrief, buildNativePrompt, buildPolicyText, buildSynthesisPrompt, flattenBrief } from './lib/prompt.js';
 import { composeReport, truncateText } from './lib/report.js';
 import { clampForArgv, runReviewer } from './lib/reviewers.js';
-import { needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
+import { needsPacket, resolveMode, resolveSettings } from './lib/settings.js';
 
 /** 加载器诊断用的插件名；`cordis.patch.yml` 里的 id 是 `review`。 */
 export const name = 'review';
@@ -66,7 +67,7 @@ function safeFileName(id, index) {
 /* ────────────────────────────── 工具元信息 ────────────────────────────── */
 
 /** 工具描述从配置生成：模型能直接看到「有哪些评审者、哪些模式」。 */
-function buildToolDescription(settings) {
+function buildToolDescription(ctx, settings) {
 	const lines = ['用外部评审者评审代码改动，返回它们的评审结论（findings、风险、建议）。', ''];
 
 	const enabled = settings.reviewers.filter((reviewer) => reviewer.enabled);
@@ -78,6 +79,21 @@ function buildToolDescription(settings) {
 			const target = reviewer.kind === 'llm' ? `${reviewer.provider}/${reviewer.model}` : reviewer.kind === 'cli' ? `可执行 ${reviewer.executable}` : `provider ${reviewer.provider}`;
 			lines.push(`- \`${reviewer.id}\`（${reviewer.kind}，${reviewer.label}）：${target}`);
 		}
+	}
+
+	// 模型来自 DSH 自己的 provider 配置：把「还能直接指名什么」讲清楚，但不在这里
+	// 枚举具体模型——那样会随 DSH 配置漂移，而且工具描述是注册时固定的一份文本。
+	const discover = settings.discover;
+	if (discover.adHoc) {
+		const registered = listRegisteredProviders(ctx);
+		lines.push(
+			'',
+			`除上面的 id，\`reviewers\` 也可以直接写 \`provider/model\`，用 DSH 里已注册的任意模型（模型与密钥都在 DSH 的 provider 配置里，插件不复制）。${registered.length > 0 ? `当前已注册的 provider：${registered.join('、')}。` : ''}`,
+		);
+	}
+	if (discover.enabled) {
+		const scope = discover.providers === undefined ? '所有已注册 provider' : discover.providers.join('、');
+		lines.push(`\`discover\` 已打开：每次调用会把 ${scope} 的模型自动纳入评审者集合${discover.inDefault ? '（并进入默认集合）' : '（要显式指名才会用到）'}${discover.exclude.length > 0 ? `；已排除 ${discover.exclude.join('、')}` : ''}。`);
 	}
 
 	const modes = Object.values(settings.modes);
@@ -104,6 +120,18 @@ function buildToolDescription(settings) {
 		'评审通常要跑几分钟：等待超过插件等待时长会返回 job id，用 job_output 读取结果；跑完会自动通知。',
 	);
 	return lines.join('\n');
+}
+
+/** 注册时能问到的 provider 列表（可能因为 llm 还没挂载而为空，空就只省略这一句）。 */
+function listRegisteredProviders(ctx) {
+	try {
+		const llm = typeof ctx.get === 'function' ? ctx.get('llm') : ctx.llm;
+		if (llm === undefined || typeof llm.listProviders !== 'function') return [];
+		const providers = llm.listProviders();
+		return Array.isArray(providers) ? providers.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0) : [];
+	} catch {
+		return [];
+	}
 }
 
 function buildParameters(settings) {
@@ -236,7 +264,7 @@ function pickSynthesizer(settings, mode, reviewers) {
 
 export function apply(ctx, config) {
 	const settings = resolveSettings(config);
-	const toolDescription = buildToolDescription(settings);
+	const toolDescription = buildToolDescription(ctx, settings);
 	const parameters = buildParameters(settings);
 
 	const disposeTool = ctx.tools.register({
@@ -256,9 +284,11 @@ export function apply(ctx, config) {
 		async execute(rawArgs, exec) {
 			const target = validateArgs(rawArgs);
 			const mode = resolveMode(settings, target.mode);
-			const reviewers = selectReviewers(settings, mode, target.reviewers);
 			const cwd = resolveCwd(exec);
 			assertDirectory(cwd);
+			// 评审者在这里解析（而不是加载时定死）：discover 会现场问 ctx.llm 要模型列表，
+			// 所以 DSH 那边加/删模型立刻生效；解析失败就地报错，模型能马上改参数重试。
+			const { reviewers, notes: discoveryNotes } = await resolveReviewerSelection(ctx, settings, mode, target.reviewers, exec.signal);
 			const owner = exec.agent?.id;
 			const ids = reviewers.map((reviewer) => reviewer.id);
 			const label = describeCall(reviewers, target);
@@ -298,8 +328,8 @@ export function apply(ctx, config) {
 							const briefText = flattenBrief(brief);
 							const scopeGiven = target.base.length > 0 || target.commit.length > 0;
 
-							// 只进报告脚注、不进评审者提示词：这条是给读结论的人看的。
-							const reportNotes = [...changes.notes];
+							// 只进报告脚注、不进评审者提示词：这些是给读结论的人看的。
+							const reportNotes = [...changes.notes, ...discoveryNotes];
 							/** 提示词被 argv 字节闸截断的评审者 id。 */
 							const argvTruncated = [];
 							const rangeFirst = reviewers.filter((reviewer) => reviewer.promptReplacesRange);
@@ -354,7 +384,7 @@ export function apply(ctx, config) {
 									synthesis = { status: 'failed', detail: '没有可用的 llm 评审者做汇总', text: '' };
 								} else {
 									const synthesisBrief = buildSynthesisPrompt({ settings, mode, target, outcomes });
-									const result = await runReviewer(ctx, { ...synthesizer, id: `${synthesizer.id}:synthesis`, label: `${synthesizer.label}（汇总）` }, { cwd, target, brief: synthesisBrief, settings, agent: exec.agent, signal: controller.signal, reportPath });
+									const result = await runReviewer(ctx, { ...synthesizer, id: `${synthesizer.id}:synthesis`, label: `${synthesizer.label}（汇总）`, source: 'config' }, { cwd, target, brief: synthesisBrief, settings, agent: exec.agent, signal: controller.signal, reportPath });
 									synthesis = { status: result.status, detail: result.detail, text: result.text };
 								}
 							}

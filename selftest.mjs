@@ -222,7 +222,13 @@ console.log('\nA. 配置归一化');
 	check('A agents 展开成 cli', settings.reviewers.filter((r) => r.kind === 'cli').map((r) => r.id).join(',') === 'codex,claude', ids.join(','));
 	check('A models 展开成 llm', settings.reviewers.find((r) => r.id === 'qwen3.8-max')?.kind === 'llm');
 	check('A reviewers 里的 subagent 推断出 kind', settings.reviewers.find((r) => r.id === 'deep')?.kind === 'subagent');
-	check('A 未知 defaultReviewers 被过滤', settings.defaultReviewers.join(',') === 'codex');
+	// adHoc 默认打开：未知 id 可能是调用时才解析出来的 provider/model，不能在这里丢掉。
+	check('A 开启 adHoc 时保留未知 defaultReviewers', settings.defaultReviewers.join(',') === 'codex,nope', settings.defaultReviewers.join(','));
+	{
+		const strict = resolveSettings({ agents: [{ preset: 'codex' }], defaultReviewers: ['codex', 'nope'], discover: { adHoc: false } });
+		check('A 关闭 adHoc 时过滤未知 defaultReviewers', strict.defaultReviewers.join(',') === 'codex', strict.defaultReviewers.join(','));
+		check('A 关闭 adHoc 时给出告警', strict.warnings.some((w) => w.includes('nope')), strict.warnings.join('|'));
+	}
 	check('A 未知 strength 降级为 standard', settings.modes.broken?.strength === 'standard');
 	check('A 未知 strength 有告警', settings.warnings.some((w) => w.includes('nonsense')));
 	check('A defaultMode 生效', settings.defaultMode === 'strict');
@@ -776,6 +782,118 @@ console.log('\nH. 回归');
 	await run(h, { base: 'main' });
 	const argv = h.state.spawns.find((spec) => spec.argv[0] === '/fake/plain').argv;
 	check('H 普通自定义模板保留范围与提示词', argv.includes('--base') && argv.includes('main') && argv.at(-1).includes('评审任务'), JSON.stringify(argv.slice(0, 4)));
+}
+
+/* ────────────────────────────── I. 模型发现与按需指名 ────────────────────────────── */
+
+console.log('\nI. 模型发现与按需指名');
+
+/** 一个「DSH 里已经配好模型」的假 llm 服务：provider/model 列表 + 会记账的 stream。 */
+function fakeLlm(catalog = { bailian: ['qwen3.8-max', 'glm-5.3', 'text-embedding-v3'], 'deepseek-official': ['deepseek-v4-flash'] }) {
+	const calls = [];
+	return {
+		calls,
+		listProviders: () => Object.keys(catalog).map((id) => ({ id, name: id === 'bailian' ? '百炼' : id })),
+		async listModels(provider) {
+			if (catalog[provider] === undefined) throw new Error('NO_ADAPTER');
+			return catalog[provider].map((id) => ({ provider, id, name: id }));
+		},
+		stream(options) {
+			calls.push(options);
+			return (async function* stream() {
+				yield { type: 'text-delta', index: 0, text: `[结论] ${options.provider}/${options.model}` };
+				yield { type: 'finish', reason: { kind: 'stop' } };
+			})();
+		},
+	};
+}
+
+/** 只跑一次评审、拿回假 llm 的调用记录。 */
+async function reviewWith(plugin, args, catalog) {
+	const llm = fakeLlm(catalog);
+	const h = await loadPlugin({ plugin, harness: { ...GIT, services: { llm } } });
+	const value = await run(h, args);
+	return { value, llm, h };
+}
+
+{
+	// 默认：不打开 discover，但可以直接按 provider/model 指名 DSH 里已注册的模型。
+	const { value, llm } = await reviewWith({ agents: [{ preset: 'codex' }] }, { reviewers: ['bailian/glm-5.3'] });
+	check('I 默认允许按需指名', llm.calls.length === 1 && llm.calls[0].provider === 'bailian' && llm.calls[0].model === 'glm-5.3', JSON.stringify(llm.calls.map((c) => `${c.provider}/${c.model}`)));
+	check('I 报告标注「按需指名」', value.report.includes('按需指名') && value.report.includes('bailian/glm-5.3'), value.report.slice(0, 400));
+	check('I 按需指名进了 reviewers 字段', value.reviewers.join(',') === 'bailian/glm-5.3', JSON.stringify(value.reviewers));
+	check('I 报告脚注说明来源', value.report.includes('不在插件配置里'), value.report.slice(-500));
+}
+{
+	// 不存在的模型不会被凭空造出来：报错并列出 DSH 现在有什么。
+	const llm = fakeLlm();
+	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, services: { llm } } });
+	const error = await rejects('I 拒绝未注册的模型', () => run(h, { reviewers: ['bailian/no-such-model'] }));
+	check('I 报错列出已注册模型', error?.message.includes('bailian/qwen3.8-max'), error?.message);
+}
+{
+	// discover 展开：providers 是范围键，写了就自动打开。
+	const { value, llm } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'], exclude: ['*embed*'] } }, { reviewers: ['bailian/qwen3.8-max', 'bailian/glm-5.3'] });
+	check('I discover 展开后两个模型都跑', llm.calls.length === 2, JSON.stringify(llm.calls.map((c) => c.model)));
+	check('I exclude 生效（embedding 不在候选里）', value.report.includes('已把 2 个模型纳入评审者'), value.report.slice(-600));
+	check('I 展开的评审者报告里标「自动发现」', value.report.includes('自动发现'), value.report.slice(0, 600));
+}
+{
+	// 裸模型名：唯一才认。
+	const { llm } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'] } }, { reviewers: ['glm-5.3'] });
+	check('I 裸模型名唯一时可用', llm.calls.length === 1 && llm.calls[0].model === 'glm-5.3', JSON.stringify(llm.calls.map((c) => c.model)));
+}
+{
+	// discover.inDefault：进入默认集合。
+	const { llm } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'], include: ['glm*'], inDefault: true } }, {});
+	check('I inDefault 时自动展开者进默认集合', llm.calls.length === 1 && llm.calls[0].model === 'glm-5.3', JSON.stringify(llm.calls.map((c) => c.model)));
+	const { llm: llm2 } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'], include: ['glm*'] } }, {});
+	check('I 未开 inDefault 时不进默认集合', llm2.calls.length === 0, JSON.stringify(llm2.calls.map((c) => c.model)));
+}
+{
+	// adHoc 关掉后，未配置的模型不可用；defaultReviewers 也在加载时被过滤。
+	const llm = fakeLlm();
+	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }], discover: { adHoc: false } }, harness: { ...GIT, services: { llm } } });
+	const error = await rejects('I 关闭 adHoc 后拒绝按需指名', () => run(h, { reviewers: ['bailian/glm-5.3'] }));
+	check('I 关闭 adHoc 的报错说明原因', error?.message.includes('adHoc'), error?.message);
+}
+{
+	// 没有静态评审者也能用：discover 单独撑起整个工具。
+	const { llm, value } = await reviewWith({ discover: { providers: ['bailian'], include: ['qwen*'] } }, {});
+	check('I 没有静态配置也能评审', llm.calls.length === 1 && llm.calls[0].model === 'qwen3.8-max', JSON.stringify(llm.calls.map((c) => c.model)));
+	check('I 报告头列出发现的评审者', value.reviewers.join(',') === 'bailian/qwen3.8-max', JSON.stringify(value.reviewers));
+}
+{
+	// discover 指定的 provider 没注册：跳过并说明，不报错。
+	const { value } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian', 'ghost'] } }, { reviewers: ['bailian/glm-5.3'] });
+	check('I 未注册的 provider 被跳过并说明', value.report.includes('"ghost" 当前没有注册'), value.report.slice(-600));
+}
+{
+	// listModels 抛错 / 超时：只跳过那个 provider。
+	const llm = {
+		listProviders: () => [{ id: 'bailian', name: '百炼' }, { id: 'broken', name: 'broken' }],
+		async listModels(provider) {
+			if (provider === 'broken') throw new Error('boom');
+			return [{ provider, id: 'qwen3.8-max', name: 'qwen3.8-max' }];
+		},
+		*stream() {
+			yield { type: 'text-delta', index: 0, text: '结论' };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		},
+	};
+	const h = await loadPlugin({ plugin: { discover: true }, harness: { ...GIT, services: { llm } } });
+	const value = await run(h, {});
+	check('I 一个 provider 报错不影响其他', value.report.includes('结论') && value.report.includes('模型列表获取失败，已跳过'), value.report.slice(-600));
+}
+{
+	// 工具描述要把「可以直接写 provider/model」讲清楚。
+	const llm = fakeLlm();
+	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, services: { llm } } });
+	const description = h.definition.description;
+	check('I 描述说明可按需指名', description.includes('provider/model') && description.includes('已注册的任意模型'), description.slice(0, 600));
+	check('I 描述列出已注册 provider', description.includes('bailian') && description.includes('deepseek-official'), description.slice(0, 700));
+	const withDiscover = await loadPlugin({ plugin: { discover: { providers: ['bailian'], exclude: ['*embed*'] } }, harness: { ...GIT, services: { llm } } });
+	check('I 描述说明 discover 已打开', withDiscover.definition.description.includes('discover') && withDiscover.definition.description.includes('已排除'), withDiscover.definition.description.slice(0, 700));
 }
 
 console.log(`\n${passes} 项通过，${failures} 项失败`);
