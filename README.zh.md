@@ -91,10 +91,10 @@ git clone git@github.com:yutingzhao1991/dsh-review.git ~/code/github/dsh-review
       - preset: codex
         model: gpt-5.6-sol
     models:
-      - provider: bainian
+      - provider: bailian
         model: qwen3.8-max
         label: Qwen3.8-Max
-      - provider: bainian
+      - provider: bailian
         model: glm-5.3
     defaultMode: balanced
     modes:
@@ -187,7 +187,7 @@ reviewers:
 
 ```yaml
 models:
-  - provider: bainian           # 任何注册进 dsh-llm 的 provider
+  - provider: bailian           # 任何注册进 dsh-llm 的 provider
     model: qwen3.8-max
     label: Qwen3.8-Max
     llm:
@@ -208,7 +208,7 @@ reviewers:
   - id: deep-dive
     kind: subagent
     provider: spawn                       # ctx.subagents 的 provider 名
-    agentProvider: bainian
+    agentProvider: bailian
     agentModel: deepseek-v4.1-flash
     label: DSH 子智能体
     maxDepth: 1
@@ -311,11 +311,11 @@ config:
         enabled: false
 
     models:
-      - provider: bainian
+      - provider: bailian
         model: qwen3.8-max
         label: Qwen3.8-Max
         llm: { maxTokens: 8192, temperature: 0 }
-      - provider: bainian
+      - provider: bailian
         model: glm-5.3
         label: GLM-5.3
 
@@ -323,7 +323,7 @@ config:
       - id: deep-dive
         kind: subagent
         provider: spawn
-        agentProvider: bainian
+        agentProvider: bailian
         agentModel: deepseek-v4.1-flash
         enabled: false
 

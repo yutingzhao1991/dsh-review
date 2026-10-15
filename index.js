@@ -57,7 +57,7 @@ function messageOf(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** 配置里的 id 可能带 `/`（`bainian/qwen`），落盘文件名要洗一遍；序号保证唯一。 */
+/** 配置里的 id 可能带 `/`（`bailian/qwen`），落盘文件名要洗一遍；序号保证唯一。 */
 function safeFileName(id, index) {
 	const cleaned = String(id).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64) || 'reviewer';
 	return `${index}-${cleaned}`;

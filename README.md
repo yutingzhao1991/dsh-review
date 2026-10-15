@@ -99,10 +99,10 @@ toggling the plugin row is not enough. Upgrades behave the same way: `git pull`,
       - preset: codex
         model: gpt-5.6-sol
     models:
-      - provider: bainian
+      - provider: bailian
         model: qwen3.8-max
         label: Qwen3.8-Max
-      - provider: bainian
+      - provider: bailian
         model: glm-5.3
     defaultMode: balanced
     modes:
@@ -197,7 +197,7 @@ no tool permissions and no repo access.
 
 ```yaml
 models:
-  - provider: bainian           # any provider registered with dsh-llm
+  - provider: bailian           # any provider registered with dsh-llm
     model: qwen3.8-max
     label: Qwen3.8-Max
     llm:
@@ -219,7 +219,7 @@ reviewers:
   - id: deep-dive
     kind: subagent
     provider: spawn                       # the ctx.subagents provider name
-    agentProvider: bainian
+    agentProvider: bailian
     agentModel: deepseek-v4.1-flash
     label: DSH subagent
     maxDepth: 1
@@ -325,11 +325,11 @@ used (`preset`/`executable`/`command` → `cli`, `provider` → `llm`, `subagent
         enabled: false
 
     models:
-      - provider: bainian
+      - provider: bailian
         model: qwen3.8-max
         label: Qwen3.8-Max
         llm: { maxTokens: 8192, temperature: 0 }
-      - provider: bainian
+      - provider: bailian
         model: glm-5.3
         label: GLM-5.3
 
@@ -337,7 +337,7 @@ used (`preset`/`executable`/`command` → `cli`, `provider` → `llm`, `subagent
       - id: deep-dive
         kind: subagent
         provider: spawn
-        agentProvider: bainian
+        agentProvider: bailian
         agentModel: deepseek-v4.1-flash
         enabled: false
 

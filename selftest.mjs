@@ -206,10 +206,10 @@ console.log('\nA. 配置归一化');
 	const settings = resolveSettings({
 		agents: [{ preset: 'codex', model: 'gpt-x' }, { preset: 'claude' }],
 		models: [
-			{ provider: 'bainian', model: 'qwen3.8-max', label: 'Qwen' },
-			{ provider: 'bainian', model: 'glm-5.3' },
+			{ provider: 'bailian', model: 'qwen3.8-max', label: 'Qwen' },
+			{ provider: 'bailian', model: 'glm-5.3' },
 		],
-		reviewers: [{ id: 'deep', subagentProvider: 'spawn', agentProvider: 'bainian', agentModel: 'deepseek-v4.1-flash' }],
+		reviewers: [{ id: 'deep', subagentProvider: 'spawn', agentProvider: 'bailian', agentModel: 'deepseek-v4.1-flash' }],
 		defaultReviewers: ['codex', 'nope'],
 		modes: {
 			quick: { strength: 'light', reviewers: ['qwen3.8-max'], prompt: '只看阻塞问题' },
@@ -245,7 +245,7 @@ console.log('\nB. 工具描述与参数校验');
 	const h = await loadPlugin({
 		plugin: {
 			agents: [{ preset: 'codex' }],
-			models: [{ provider: 'bainian', model: 'qwen3.8-max' }],
+			models: [{ provider: 'bailian', model: 'qwen3.8-max' }],
 			modes: { deep: { strength: 'deep', description: '彻底评审' } },
 		},
 	});
@@ -370,13 +370,13 @@ console.log('\nD. LLM 评审者');
 		},
 	};
 	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bainian', model: 'qwen3.8-max', label: 'Qwen', llm: { maxTokens: 4096, temperature: 0 } }] },
+		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max', label: 'Qwen', llm: { maxTokens: 4096, temperature: 0 } }] },
 		harness: { ...GIT, services },
 	});
 	const value = await run(h, {});
 	check('D 结论进报告', value.report.includes('[P1] src/a.js:1'), value.report.slice(0, 300));
-	check('D 报告标注 provider/model', value.report.includes('bainian/qwen3.8-max'));
-	check('D 调用了 ctx.llm', llmCalls.length === 1 && llmCalls[0].provider === 'bainian' && llmCalls[0].model === 'qwen3.8-max');
+	check('D 报告标注 provider/model', value.report.includes('bailian/qwen3.8-max'));
+	check('D 调用了 ctx.llm', llmCalls.length === 1 && llmCalls[0].provider === 'bailian' && llmCalls[0].model === 'qwen3.8-max');
 	check('D 传了 system 与 user 消息', typeof llmCalls[0].system === 'string' && llmCalls[0].messages[0].content[0].type === 'text');
 	check('D 传了 maxTokens/temperature', llmCalls[0].maxTokens === 4096 && llmCalls[0].temperature === 0);
 	check('D 消息里带 diff 包', llmCalls[0].messages[0].content[0].text.includes('const a = 2'));
@@ -392,13 +392,13 @@ console.log('\nD. LLM 评审者');
 			},
 		},
 	};
-	const h = await loadPlugin({ plugin: { models: [{ provider: 'bainian', model: 'glm-5.3' }] }, harness: { ...GIT, services } });
+	const h = await loadPlugin({ plugin: { models: [{ provider: 'bailian', model: 'glm-5.3' }] }, harness: { ...GIT, services } });
 	const value = await run(h, {});
 	check('D 模型失败被收敛', value.report.includes('**失败**') && value.report.includes('AUTH'), value.report.slice(0, 300));
 }
 {
 	// 没有 llm 服务：报告里说明，而不是抛给上层。
-	const h = await loadPlugin({ plugin: { models: [{ provider: 'bainian', model: 'glm-5.3' }] }, harness: { ...GIT } });
+	const h = await loadPlugin({ plugin: { models: [{ provider: 'bailian', model: 'glm-5.3' }] }, harness: { ...GIT } });
 	const value = await run(h, {});
 	check('D 缺 ctx.llm 时给出说明', value.report.includes('ctx.llm 服务不可用'), value.report.slice(0, 300));
 }
@@ -408,7 +408,7 @@ console.log('\nD. LLM 评审者');
 	const services = { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } };
 	const h = await loadPlugin({
 		plugin: {
-			models: [{ provider: 'bainian', model: 'qwen3.8-max' }],
+			models: [{ provider: 'bailian', model: 'qwen3.8-max' }],
 			modes: { strict: { strength: 'deep', prompt: '只关注错误处理', reviewers: ['qwen3.8-max'] } },
 			defaultMode: 'strict',
 		},
@@ -439,12 +439,12 @@ console.log('\nE. 子智能体评审者');
 		},
 	};
 	const h = await loadPlugin({
-		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', agentProvider: 'bainian', agentModel: 'deepseek-v4.1-flash', maxDepth: 1, persona: '你是评审者' }] },
+		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', agentProvider: 'bailian', agentModel: 'deepseek-v4.1-flash', maxDepth: 1, persona: '你是评审者' }] },
 		harness: { ...GIT, services },
 	});
 	const value = await run(h, {});
 	check('E 子智能体结论进报告', value.report.includes('子智能体结论'), value.report.slice(0, 300));
-	check('E 传了 provider 与 model', subagentCalls[0].request.agentOptions.provider === 'bainian' && subagentCalls[0].request.agentOptions.model === 'deepseek-v4.1-flash');
+	check('E 传了 provider 与 model', subagentCalls[0].request.agentOptions.provider === 'bailian' && subagentCalls[0].request.agentOptions.model === 'deepseek-v4.1-flash');
 	check('E 传了 parent 与 persona', subagentCalls[0].request.parent.id === 'agent-1' && subagentCalls[0].request.persona === '你是评审者');
 	check('E 提示词里有评审包', subagentCalls[0].request.prompt[0].text.includes('评审任务'));
 }
@@ -460,7 +460,7 @@ console.log('\nF. 编排');
 {
 	const services = { llm: { *stream() { yield { type: 'text-delta', index: 0, text: 'LLM 结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; } } };
 	const h = await loadPlugin({
-		plugin: { agents: [{ preset: 'codex' }], models: [{ provider: 'bainian', model: 'qwen3.8-max' }] },
+		plugin: { agents: [{ preset: 'codex' }], models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
 		harness: { ...GIT, report: 'Codex 结论', services },
 	});
 	const value = await run(h, {});
@@ -491,7 +491,7 @@ console.log('\nF. 编排');
 	// 一个评审者失败不影响另一个。
 	const services = { llm: { *stream() { yield { type: 'text-delta', index: 0, text: 'LLM 结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; } } };
 	const h = await loadPlugin({
-		plugin: { agents: [{ preset: 'codex' }, { preset: 'gemini' }], models: [{ provider: 'bainian', model: 'qwen3.8-max' }] },
+		plugin: { agents: [{ preset: 'codex' }, { preset: 'gemini' }], models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
 		harness: {
 			...GIT,
 			report: 'Codex 结论',
@@ -529,8 +529,8 @@ console.log('\nF. 编排');
 	const h = await loadPlugin({
 		plugin: {
 			models: [
-				{ provider: 'bainian', model: 'qwen3.8-max' },
-				{ provider: 'bainian', model: 'glm-5.3' },
+				{ provider: 'bailian', model: 'qwen3.8-max' },
+				{ provider: 'bailian', model: 'glm-5.3' },
 			],
 			modes: { deep: { strength: 'deep', synthesize: true } },
 			defaultMode: 'deep',
@@ -573,7 +573,7 @@ console.log('\nF. 编排');
 console.log('\nG. 边界');
 {
 	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bainian', model: 'qwen3.8-max' }] },
+		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
 		harness: { ...GIT, gitScript: [{ argv: ['git', 'rev-parse', '--is-inside-work-tree'], exitCode: 128, stderr: 'not a git repository' }], services: { llm: { *stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; } } } },
 	});
 	const value = await run(h, {});
@@ -595,7 +595,7 @@ console.log('\nG. 边界');
 		{ argv: ['git', 'rev-parse', '--show-toplevel'], stdout: `${WORK}\n` },
 		{ argv: ['git', '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-z', '-uall'], stdout: '' },
 	];
-	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }], models: [{ provider: 'bainian', model: 'qwen3.8-max' }] }, harness: { ...GIT, gitScript: clean, report: '结论' } });
+	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }], models: [{ provider: 'bailian', model: 'qwen3.8-max' }] }, harness: { ...GIT, gitScript: clean, report: '结论' } });
 	const value = await run(h, {});
 	check('G 无改动时短路', value.report.includes('未检测到需要评审的改动') && !value.report.includes('结论'), value.report.slice(0, 300));
 	check('G 无改动时不调评审者', !h.state.spawns.some((spec) => spec.argv[0] === '/fake/codex'));
@@ -622,7 +622,7 @@ console.log('\nH. 回归');
 	const statusArgv = h => h.state.spawns.filter((spec) => spec.argv.includes('status')).map((spec) => spec.argv.join(' '));
 	const calls = [];
 	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bainian', model: 'qwen3.8-max' }] },
+		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
 		harness: { ...GIT, services: { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } } },
 	});
 	await run(h, {});
@@ -654,8 +654,8 @@ console.log('\nH. 回归');
 	const h = await loadPlugin({
 		plugin: {
 			reviewers: [
-				{ id: 'dis', kind: 'llm', provider: 'bainian', model: 'glm-5.3', enabled: false },
-				{ id: 'on', kind: 'llm', provider: 'bainian', model: 'qwen3.8-max' },
+				{ id: 'dis', kind: 'llm', provider: 'bailian', model: 'glm-5.3', enabled: false },
+				{ id: 'on', kind: 'llm', provider: 'bailian', model: 'qwen3.8-max' },
 			],
 			modes: { deep: { synthesize: true, synthesizeReviewer: 'dis' } },
 			defaultMode: 'deep',
@@ -717,7 +717,7 @@ console.log('\nH. 回归');
 	// 回归：commit 范围不把当前未跟踪文件算进材料，也不算进变更规模。
 	const calls = [];
 	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bainian', model: 'qwen3.8-max' }] },
+		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
 		harness: { ...GIT, services: { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } } },
 	});
 	const value = await run(h, { commit: 'abc123' });
