@@ -7,7 +7,8 @@
   "exports": {
     ".": "./index.js",
     "./package.json": "./package.json",
-    "./locale/*.json": "./locale/*.json"
+    "./locale/*.json": "./locale/*.json",
+    "./client": "./client/client.js"
   },
   "files": [
     "index.js",
@@ -17,11 +18,22 @@
     "locale/*.json",
     "README.md",
     "README.zh.md",
-    "LICENSE"
+    "LICENSE",
+    "client/client.js"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
     }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.4"
   }
 }

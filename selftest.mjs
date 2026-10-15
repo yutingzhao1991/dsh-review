@@ -896,5 +896,228 @@ async function reviewWith(plugin, args, catalog) {
 	check('I 描述说明 discover 已打开', withDiscover.definition.description.includes('discover') && withDiscover.definition.description.includes('已排除'), withDiscover.definition.description.slice(0, 700));
 }
 
+/* ────────────────────────────── J. 浏览器半边（client bundle） ────────────────────────────── */
+
+console.log('\nJ. 浏览器半边');
+
+/**
+ * 用桩件在 Node 里加载 client/client.js：真实格式是 window.__ModuleLoader__.load({id, factory})，
+ * 工厂只要 react 与 primitives 两个 external，所以这里替身足够跑通 apply 与字段转换。
+ */
+async function loadClientBundle() {
+	const captured = { modules: [], slots: [], locales: [], effects: [], models: [], renders: [] };
+	const react = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }), useId: () => 'id' };
+	class SettingsFormModel {
+		constructor(scope, specs) {
+			this.scope = scope;
+			this.specs = specs;
+			captured.models.push(this);
+		}
+		bind(project) {
+			this.project = project;
+			return { getSnapshot: () => project(), subscribe: () => () => {} };
+		}
+		shell() {
+			return { available: true, writable: true, dirty: false, invalid: false, saving: false, failed: false };
+		}
+		field(name) {
+			const spec = this.specs.find((entry) => entry.field === name);
+			const section = this.scope.getSnapshot().value ?? {};
+			const read = (path) => path.split('.').reduce((acc, key) => (acc === undefined || acc === null ? undefined : acc[key]), section);
+			return { text: spec === undefined ? '' : spec.format(read(name)), overridden: false, invalid: false };
+		}
+		actions() {
+			return { edit: () => {}, resetField: () => {}, save: () => {}, discard: () => {} };
+		}
+		dispose() {}
+	}
+	const primitives = {
+		SettingsForm: (props) => {
+			captured.renders.push(props);
+			return { type: 'SettingsForm', props };
+		},
+		SettingsValueField: (props) => ({ type: 'SettingsValueField', props }),
+		SettingsFormModel,
+		settingsTextField: (field) => ({ field, format: (value) => (value === undefined || value === null ? '' : String(value)), parse: (text) => (String(text).trim() === '' ? { kind: 'clear' } : { kind: 'set', value: String(text) }) }),
+		settingsNumberField: (field) => ({
+			field,
+			format: (value) => (value === undefined || value === null ? '' : String(value)),
+			parse: (text) => {
+				const raw = String(text).trim();
+				if (raw === '') return { kind: 'clear' };
+				const value = Number(raw);
+				return Number.isFinite(value) && Number.isInteger(value) ? { kind: 'set', value } : undefined;
+			},
+		}),
+	};
+	const scope = {
+		getSnapshot: () => ({ status: 'ready', value: { defaultReviewers: ['codex', 'qwen'], injectPolicy: true, reviewers: [{ id: 'qwen', kind: 'llm' }], discover: { enabled: true, exclude: ['*embedding*'] } }, base: {}, user: {}, writable: true, revision: 7 }),
+		subscribe: () => () => {},
+		mutate: async () => true,
+	};
+	const slotHandles = [];
+	const ctx = {
+		locale: {
+			bind: () => (key) => `t:${key}`,
+			register: (ns, dictionaries) => {
+				captured.locales.push({ ns, dictionaries });
+				return () => {};
+			},
+		},
+		configForms: {
+			get: (entry) => {
+				captured.entry = entry;
+				return scope;
+			},
+			whileServed: (namespaces, register) => {
+				captured.served = namespaces;
+				captured.modules.push(register());
+				return () => {};
+			},
+		},
+		slots: {
+			inject: (name, register) => {
+				captured.slots.push(name);
+				return register();
+			},
+			register: (options, render) => {
+				captured.registrations = captured.registrations ?? [];
+				captured.registrations.push({ options, render });
+				const handle = () => {};
+				slotHandles.push(handle);
+				return handle;
+			},
+		},
+		effect: (fn, label) => {
+			captured.effects.push(label);
+			return fn();
+		},
+	};
+
+	let loadArgs;
+	globalThis.window = {
+		__ModuleLoader__: {
+			load: (args) => {
+				loadArgs = args;
+			},
+		},
+	};
+	const source = readFileSync(new URL('./client/client.js', import.meta.url), 'utf8');
+	// 在受控的词法环境里执行：把 window / require 注入进去。
+	const factory = new Function('window', 'require', `${source}\n; return window.__ModuleLoader__.__exports;`);
+	globalThis.window.__ModuleLoader__.load = (args) => {
+		loadArgs = args;
+		globalThis.window.__ModuleLoader__.__exports = args.factory((name) => {
+			if (name === 'react') return react;
+			if (name === '@deepseek-ai/dsh-client-ui-primitives') return primitives;
+			throw new Error(`未知 external: ${name}`);
+		});
+	};
+	factory(globalThis.window, () => {
+		throw new Error('不该用到');
+	});
+	const mod = loadArgs.factory((name) => {
+		if (name === 'react') return react;
+		if (name === '@deepseek-ai/dsh-client-ui-primitives') return primitives;
+		throw new Error(`未知 external: ${name}`);
+	});
+	return { mod, ctx, captured, scope, slotHandles };
+}
+
+{
+	const { mod, ctx, captured, scope } = await loadClientBundle();
+	check('J 导出 name', mod.name === 'dsh-review', mod.name);
+	check('J 导出 inject（slots/locale/configForms）', JSON.stringify(mod.inject) === JSON.stringify(['slots', 'locale', 'configForms']), JSON.stringify(mod.inject));
+	check('J 导出 apply', typeof mod.apply === 'function');
+
+	mod.apply(ctx);
+	check('J 读取 review 命名空间', captured.entry === 'review', captured.entry);
+	check('J 注册中英字典', captured.locales.length === 1 && captured.locales[0].ns === 'dsh-review' && Boolean(captured.locales[0].dictionaries.zh) && Boolean(captured.locales[0].dictionaries.en), JSON.stringify(captured.locales.map((entry) => entry.ns)));
+	check('J 只在宿主 serve 命名空间时挂载', JSON.stringify(captured.served) === JSON.stringify(['review']), JSON.stringify(captured.served));
+	check('J 行页与包页两个槽位都占', JSON.stringify(captured.slots) === JSON.stringify(['plugins.row.config', 'plugins.bundle.config']), JSON.stringify(captured.slots));
+	const keys = (captured.registrations ?? []).map((entry) => entry.options.key);
+	check('J 槽位 key 正确', JSON.stringify(keys) === JSON.stringify(['dsh-review#review', 'dsh-review']), JSON.stringify(keys));
+	check('J 注册带 locale 命名空间', (captured.registrations ?? []).every((entry) => entry.options.locale === 'dsh-review'));
+
+	// 字段转换：这是浏览器侧唯一的真逻辑，逐条钉住。
+	const model = captured.models[0];
+	const spec = (name) => model.specs.find((entry) => entry.field === name);
+	check('J 字段数量与顺序稳定', model.specs.length === 20, String(model.specs.length));
+	check('J 数组字段 format', spec('defaultReviewers').format(['codex', 'qwen']) === 'codex, qwen');
+	check('J 数组字段 parse', JSON.stringify(spec('defaultReviewers').parse('codex, qwen')) === JSON.stringify({ kind: 'set', value: ['codex', 'qwen'] }));
+	check('J 数组字段 parse 支持换行与空格', JSON.stringify(spec('defaultReviewers').parse(' codex ,\n qwen ')) === JSON.stringify({ kind: 'set', value: ['codex', 'qwen'] }));
+	check('J 数组字段空值 = 清除', JSON.stringify(spec('defaultReviewers').parse('  ')) === JSON.stringify({ kind: 'clear' }));
+	check('J 布尔字段 parse true', JSON.stringify(spec('injectPolicy').parse('yes')) === JSON.stringify({ kind: 'set', value: true }));
+	check('J 布尔字段 parse false', JSON.stringify(spec('injectPolicy').parse('关')) === JSON.stringify({ kind: 'set', value: false }));
+	check('J 布尔字段拒绝乱填', spec('injectPolicy').parse('maybe') === undefined);
+	check('J 枚举字段只认 zh/en/auto', spec('language').parse('en')?.value === 'en' && spec('language').parse('fr') === undefined);
+	check('J 数字字段拒绝负数', spec('maxArgBytes').parse('-1') === undefined && spec('maxArgBytes').parse('1024')?.value === 1024);
+	check('J 数字字段拒绝小数', spec('waitMs').parse('1.5') === undefined);
+	check('J JSON 字段 format 用缩进', spec('reviewers').format([{ id: 'q' }]).includes('\n'));
+	check('J JSON 字段 parse 数组', JSON.stringify(spec('reviewers').parse('[{"id":"q"}]')) === JSON.stringify({ kind: 'set', value: [{ id: 'q' }] }));
+	check('J JSON 字段拒绝非法 JSON', spec('reviewers').parse('[{id:q}]') === undefined);
+	check('J JSON 字段拒绝类型不符', spec('reviewers').parse('{"id":"q"}') === undefined && spec('modes').parse('[1,2]') === undefined);
+	check('J JSON 字段接受对象', JSON.stringify(spec('modes').parse('{"deep":{"strength":"deep"}}')?.value) === JSON.stringify({ deep: { strength: 'deep' } }));
+
+	// 渲染：拿到 hooks 包出来的快照 + 写动作。
+	const page = (captured.registrations ?? [])[0].render;
+	const face = (captured.registrations ?? [])[0].options.inject();
+	check('J inject 提供 hooks 与写动作', Boolean(face.hooks?.reviewConfigForm) && typeof face.save === 'function' && typeof face.edit === 'function' && typeof face.resetField === 'function' && typeof face.discard === 'function', Object.keys(face).join(','));
+	const summary = page({ view: 'summary', t: (key) => key, ...face, useReviewConfigForm: (selector) => selector({ shell: model.shell(), fields: {} }) });
+	check('J summary 视图返回一行说明', typeof summary === 'string' && summary.length > 0, String(summary));
+	const element = page({ view: 'page', t: (key) => key, ...face, useReviewConfigForm: (selector) => selector({ shell: model.shell(), fields: Object.fromEntries(model.specs.map((entry) => [entry.field, model.field(entry.field)])) }) });
+	check('J 页面用 SettingsForm 包住控件', typeof element?.type === 'function' && element.props.labels?.save === 'save', JSON.stringify(element?.props?.labels));
+	check('J 表单带 save/discard', typeof element.props.onSave === 'function' && typeof element.props.onDiscard === 'function');
+	const groups = element.children.flat();
+	check('J 分成四组渲染', groups.length === 4, String(groups.length));
+	const renderedFields = groups.flatMap((group) => group.children.slice(1).flat());
+	check('J 每个字段都渲染成控件', renderedFields.length === 20, String(renderedFields.length));
+	check('J 字段控件带 label 与 hint', renderedFields.every((field) => typeof field.props.label === 'string' && typeof field.props.hint === 'string'));
+	check('J 字段 label 走字典', renderedFields[0].props.label === 'defaultReviewers', renderedFields[0].props.label);
+	const reviewersField = renderedFields.find((field) => field.props.id === 'plugin-config-review-reviewers');
+	check('J JSON 字段显示出当前值', typeof reviewersField?.props.text === 'string' && reviewersField.props.text.includes('\"qwen\"'), String(reviewersField?.props.text).slice(0, 80));
+}
+
+/* ────────────────────────────── K. GUI 配置的宿主半边 ────────────────────────────── */
+
+console.log('\nK. GUI 配置的宿主半边');
+
+{
+	const schema = await import(new URL('./lib/schema.js', import.meta.url).href);
+	const { resolveSettings } = await import(new URL('./lib/settings.js', import.meta.url).href);
+
+	// volatile 盒子的识别与摊平（纯逻辑，不依赖 schemastery）
+	const box = (value) => ({ get: () => value });
+	check('K 识别 volatile 盒子', schema.isVolatileBox(box(1)) === true && schema.isVolatileBox({ get: 1 }) === false, 'get 不是函数时不算盒子');
+	check('K 普通值/数组/undefined 不算盒子', schema.isVolatileBox([]) === false && schema.isVolatileBox(undefined) === false && schema.isVolatileBox('x') === false);
+	check('K 摊平顶层盒子', schema.unwrapConfig({ waitMs: box(1000) }).waitMs === 1000);
+	check('K 摊平嵌套盒子', JSON.stringify(schema.unwrapConfig({ discover: { enabled: box(true), providers: box(['bailian']) } })) === JSON.stringify({ discover: { enabled: true, providers: ['bailian'] } }));
+	check('K 摊平数组里的盒子', JSON.stringify(schema.unwrapConfig({ defaultReviewers: [box('codex'), 'qwen'] })) === JSON.stringify({ defaultReviewers: ['codex', 'qwen'] }));
+	check('K 普通值原样保留', JSON.stringify(schema.unwrapConfig({ modes: { deep: { strength: 'deep' } }, n: 3 })) === JSON.stringify({ modes: { deep: { strength: 'deep' } }, n: 3 }));
+
+	if (schema.Config === undefined) {
+		console.log('  skip schemastery 在本机解析不到：只验证「没有 schema 时插件照常工作」');
+		check('K 没有 schema 时 Config 为 undefined', schema.Config === undefined);
+	} else {
+		console.log(`  ok   K 解析到 schemastery，Config 已生成`);
+		const Config = schema.Config;
+		const config = { agents: [{ preset: 'codex' }], modes: { deep: { strength: 'deep' } }, waitMs: 60000, discover: { providers: ['bailian'] }, 未知键: '保留' };
+		const resolved = Config(config);
+		check('K schema 接受部分配置（缺省字段不报错）', resolved !== undefined);
+		check('K 未声明的键不被丢弃', schema.unwrapConfig(resolved).未知键 === '保留' && Array.isArray(schema.unwrapConfig(resolved).agents), JSON.stringify(Object.keys(schema.unwrapConfig(resolved))));
+		check('K 声明的字段是 volatile 盒子', schema.isVolatileBox(resolved.waitMs) === true, typeof resolved.waitMs);
+		check('K 声明的嵌套叶子也是盒子', schema.isVolatileBox(resolved.discover?.providers) === true, typeof resolved.discover?.providers);
+		check('K 盒子取回原始值', resolved.waitMs.get() === 60000 && JSON.stringify(resolved.discover.providers.get()) === JSON.stringify(['bailian']));
+		check('K reviewers/modes 原样透传', JSON.stringify(schema.unwrapConfig(resolved).modes) === JSON.stringify({ deep: { strength: 'deep' } }));
+		// 最关键的一条：声明 schema 之后，配置归一化的结果与不声明时完全一致。
+		const viaSchema = resolveSettings(schema.unwrapConfig(resolved));
+		const direct = resolveSettings(config);
+		check('K schema 不改变归一化结果', JSON.stringify({ ...viaSchema, warnings: [] }) === JSON.stringify({ ...direct, warnings: [] }), JSON.stringify(viaSchema.reviewers.length) + ' vs ' + JSON.stringify(direct.reviewers.length));
+		// GUI 写入的值同样走这条路
+		const edited = resolveSettings(schema.unwrapConfig(Config({ defaultReviewers: ['qwen'], discover: { adHoc: false } })));
+		check('K GUI 写入后归一化生效', edited.defaultReviewers.join(',') === 'qwen' && edited.discover.adHoc === false, JSON.stringify({ defaultReviewers: edited.defaultReviewers, adHoc: edited.discover.adHoc }));
+	}
+}
+
 console.log(`\n${passes} 项通过，${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

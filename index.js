@@ -28,10 +28,18 @@ import { resolveReviewerSelection } from './lib/discovery.js';
 import { buildBrief, buildNativePrompt, buildPolicyText, buildSynthesisPrompt, flattenBrief } from './lib/prompt.js';
 import { composeReport, truncateText } from './lib/report.js';
 import { clampForArgv, runReviewer } from './lib/reviewers.js';
+import { Config, schemaAvailable, unwrapConfig } from './lib/schema.js';
 import { needsPacket, resolveMode, resolveSettings } from './lib/settings.js';
 
 /** 加载器诊断用的插件名；`cordis.patch.yml` 里的 id 是 `review`。 */
 export const name = 'review';
+
+/**
+ * GUI 表单的宿主半边：`dsh-settings` 只把 Config schema 里标了 `.volatile()` 的字段
+ * 投影成设置页表单，写到 profile patch 层并立即生效。拿不到 schemastery 时这里是
+ * undefined —— 插件照常工作，只是 GUI 里没有表单（工具描述会说明）。
+ */
+export { Config };
 
 /** 硬依赖：缺任何一个都说明这套组合跑不了这个工具，直接不激活而不是半残。 */
 export const inject = ['tools', 'subprocess', 'jobs'];
@@ -115,6 +123,7 @@ function buildToolDescription(ctx, settings) {
 
 	lines.push(
 		'',
+		schemaAvailable ? '配置也可以在 GUI 里改：侧边栏 Plugins → dsh-review 的行/包页面（解析与保存都由宿主负责）。' : 'GUI 表单在本部署不可用（找不到 @deepseek-ai/schemastery），配置请改 profile 的 cordis.patch.yml。',
 		'不传参数时评审工作区里 staged / unstaged / untracked 的全部改动。',
 		'`base` / `commit` 与 `instructions` 互斥（codex CLI 的 PROMPT 与范围开关不能同时出现），要「评某个范围 + 附加关注点」请用 `mode`。',
 		'评审通常要跑几分钟：等待超过插件等待时长会返回 job id，用 job_output 读取结果；跑完会自动通知。',
@@ -263,7 +272,10 @@ function pickSynthesizer(settings, mode, reviewers) {
 /* ────────────────────────────── 插件入口 ────────────────────────────── */
 
 export function apply(ctx, config) {
-	const settings = resolveSettings(config);
+	// 保留原始 config：volatile 字段是「活」的盒子，GUI 改完立刻反映在下次 resolve 上。
+	const rawConfig = config;
+	const snapshot = () => resolveSettings(unwrapConfig(rawConfig));
+	const settings = snapshot();
 	const toolDescription = buildToolDescription(ctx, settings);
 	const parameters = buildParameters(settings);
 
@@ -282,13 +294,15 @@ export function apply(ctx, config) {
 			return { card: 'terminal', title: `review(${ids}) ${scope}` };
 		},
 		async execute(rawArgs, exec) {
+			// 每次调用现读配置：GUI 里 volatile 字段改完立刻生效，不必等重载。
+			const live = snapshot();
 			const target = validateArgs(rawArgs);
-			const mode = resolveMode(settings, target.mode);
+			const mode = resolveMode(live, target.mode);
 			const cwd = resolveCwd(exec);
 			assertDirectory(cwd);
 			// 评审者在这里解析（而不是加载时定死）：discover 会现场问 ctx.llm 要模型列表，
 			// 所以 DSH 那边加/删模型立刻生效；解析失败就地报错，模型能马上改参数重试。
-			const { reviewers, notes: discoveryNotes } = await resolveReviewerSelection(ctx, settings, mode, target.reviewers, exec.signal);
+			const { reviewers, notes: discoveryNotes } = await resolveReviewerSelection(ctx, live, mode, target.reviewers, exec.signal);
 			const owner = exec.agent?.id;
 			const ids = reviewers.map((reviewer) => reviewer.id);
 			const label = describeCall(reviewers, target);
@@ -303,15 +317,15 @@ export function apply(ctx, config) {
 				run: (job) => {
 					const controller = new AbortController();
 					let timer;
-					if (settings.hardTimeoutMs > 0) {
-						timer = setTimeout(() => controller.abort(`超过 ${settings.hardTimeoutMs}ms 硬上限`), settings.hardTimeoutMs);
+					if (live.hardTimeoutMs > 0) {
+						timer = setTimeout(() => controller.abort(`超过 ${live.hardTimeoutMs}ms 硬上限`), live.hardTimeoutMs);
 						timer.unref?.();
 					}
 					job.updateProgress(`reviewing (${ids.join(', ')})`);
 
 					const done = (async () => {
 						try {
-							const changes = await collectChanges(ctx, settings, target, cwd, controller.signal, { packet: needsPacket(reviewers) });
+							const changes = await collectChanges(ctx, live, target, cwd, controller.signal, { packet: needsPacket(reviewers) });
 
 							// 没有改动就不要打扰评审者：多花几分钟、还容易换来一堆幻觉 findings。
 							const gitBroke = changes.notes.some((note) => note.includes('失败'));
@@ -323,7 +337,7 @@ export function apply(ctx, config) {
 								return { status: 'completed', detail: '没有改动' };
 							}
 
-							const brief = buildBrief({ settings, mode, target, changes, extraNotes: changes.notes });
+							const brief = buildBrief({ settings: live, mode, target, changes, extraNotes: changes.notes });
 							const nativePrompt = buildNativePrompt(mode, target);
 							const briefText = flattenBrief(brief);
 							const scopeGiven = target.base.length > 0 || target.commit.length > 0;
@@ -350,7 +364,7 @@ export function apply(ctx, config) {
 											const raw = reviewer.promptReplacesRange ? (scopeGiven ? undefined : nativePrompt) : briefText;
 											if (raw === undefined) promptText = undefined;
 											else {
-												const clamped = clampForArgv(raw, settings.maxArgBytes);
+												const clamped = clampForArgv(raw, live.maxArgBytes);
 												if (clamped.clamped) argvTruncated.push(reviewer.id);
 												promptText = clamped.text;
 											}
@@ -361,7 +375,7 @@ export function apply(ctx, config) {
 										target,
 										brief,
 										changes,
-										settings,
+										settings: live,
 										agent: exec.agent,
 										signal: controller.signal,
 										promptText,
@@ -372,19 +386,19 @@ export function apply(ctx, config) {
 
 							if (argvTruncated.length > 0) {
 								reportNotes.push(
-									`${[...new Set(argvTruncated)].join('、')}：提示词超过单参数 ${settings.maxArgBytes} 字节上限，diff 被截断后才交给 CLI。这些评审者看到的材料比其他人少——「没有问题」不等于覆盖了全部改动；要看完整 diff 请调小 maxDiffChars 分批评审，或改用 llm / subagent 评审者。`,
+									`${[...new Set(argvTruncated)].join('、')}：提示词超过单参数 ${live.maxArgBytes} 字节上限，diff 被截断后才交给 CLI。这些评审者看到的材料比其他人少——「没有问题」不等于覆盖了全部改动；要看完整 diff 请调小 maxDiffChars 分批评审，或改用 llm / subagent 评审者。`,
 								);
 							}
 
 							// 可选的汇总：把多份结论合并、去重、标注共识。
 							let synthesis;
 							if (mode?.synthesize === true && outcomes.filter((outcome) => outcome.status === 'completed').length > 1) {
-								const synthesizer = pickSynthesizer(settings, mode, reviewers);
+								const synthesizer = pickSynthesizer(live, mode, reviewers);
 								if (synthesizer === undefined) {
 									synthesis = { status: 'failed', detail: '没有可用的 llm 评审者做汇总', text: '' };
 								} else {
-									const synthesisBrief = buildSynthesisPrompt({ settings, mode, target, outcomes });
-									const result = await runReviewer(ctx, { ...synthesizer, id: `${synthesizer.id}:synthesis`, label: `${synthesizer.label}（汇总）`, source: 'config' }, { cwd, target, brief: synthesisBrief, settings, agent: exec.agent, signal: controller.signal, reportPath });
+									const synthesisBrief = buildSynthesisPrompt({ settings: live, mode, target, outcomes });
+									const result = await runReviewer(ctx, { ...synthesizer, id: `${synthesizer.id}:synthesis`, label: `${synthesizer.label}（汇总）`, source: 'config' }, { cwd, target, brief: synthesisBrief, settings: live, agent: exec.agent, signal: controller.signal, reportPath });
 									synthesis = { status: result.status, detail: result.detail, text: result.text };
 								}
 							}
@@ -393,14 +407,14 @@ export function apply(ctx, config) {
 							const status = completed > 0 ? 'completed' : 'failed';
 							const detail = `${completed}/${outcomes.length} 个评审者完成`;
 
-							const draft = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, notes: reportNotes, warnings: settings.warnings });
-							const truncation = truncateText(draft, settings.maxResultChars);
+							const draft = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, notes: reportNotes, warnings: live.warnings });
+							const truncation = truncateText(draft, live.maxResultChars);
 							let shown = draft;
 							if (truncation.truncated) {
 								// 只有截断时才需要把全文留在盘上：结果里给出了路径，不能删。
-								const full = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, reportPath, truncated: true, notes: reportNotes, warnings: settings.warnings });
+								const full = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, reportPath, truncated: true, notes: reportNotes, warnings: live.warnings });
 								await writeFile(reportPath, full, 'utf8').catch(() => undefined);
-								shown = `${truncateText(full, settings.maxResultChars).text}\n\n[报告已截断；完整报告：${reportPath}]`;
+								shown = `${truncateText(full, live.maxResultChars).text}\n\n[报告已截断；完整报告：${reportPath}]`;
 							} else {
 								// 全文已经在结果里，临时目录（各 CLI 的 --output-last-message 等）不再被引用。
 								await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
@@ -438,11 +452,11 @@ export function apply(ctx, config) {
 			});
 
 			// `waitMs <= 0` 是「纯后台」：注册表不接受非正数的等待时长，也不必等。
-			if (settings.waitMs <= 0) return runningValue('running');
+			if (live.waitMs <= 0) return runningValue('running');
 
 			let view;
 			try {
-				view = await ctx.jobs.wait(jobId, settings.waitMs, owner, exec.signal);
+				view = await ctx.jobs.wait(jobId, live.waitMs, owner, exec.signal);
 			} catch (error) {
 				await stopJob(ctx, jobId, owner, 'tool call aborted');
 				throw new Error(`review 已取消（${messageOf(error)}）。`);

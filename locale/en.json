@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Code Review Tool",
-    "description": "Adds a generic review tool: fan code review out to CLI agents (codex/claude), to other models called through DSH's own llm service (bailian qwen/glm, ...), or to a read-only subagent. Reviewers and review modes are configurable."
+    "description": "Adds a generic review tool: CLI agents (codex/claude), other models called through DSH's own llm service (bailian qwen/glm/kimi), or a read-only subagent. Reviewers and modes are configurable in the profile patch or directly in the GUI Plugins page."
   }
 }

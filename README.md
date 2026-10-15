@@ -38,6 +38,7 @@ flowchart LR
 - [Quick start](#quick-start)
 - [Three kinds of reviewer](#three-kinds-of-reviewer)
 - [Model discovery](#model-discovery)
+- [Configure in the GUI](#configure-in-the-gui)
 - [Review modes](#review-modes)
 - [Configuration reference](#configuration-reference)
 - [How one call runs](#how-one-call-runs)
@@ -302,6 +303,44 @@ configured reviewers *and* the models DSH has registered right now.
 If your config contains **only** `discover` and no static reviewers, the discovered set
 becomes the default — otherwise "call `review()` with no arguments" would mean nothing.
 
+## Configure in the GUI
+
+You do not have to hand-edit YAML. Open **Plugins** in the Web sidebar, pick **dsh-review**,
+and open its row (or the bundle card): the page renders a form for this plugin's config.
+
+What you get there:
+
+| Group | Fields |
+| --- | --- |
+| Review behaviour | default reviewers, default mode, output language, policy injection |
+| Budgets and timeouts | foreground wait, hard timeout, report/diff/per-file/untracked caps, argv byte cap |
+| Model discovery | expand switch, providers, include/exclude globs, label template, default-set, ad-hoc switch |
+| Advanced (JSON) | `reviewers` and `modes` as JSON text |
+
+Saving writes through DSH's own settings machinery: the edit lands in the profile patch
+(`cordis.patch.yml`) and is applied immediately, with conflict detection if the document moved
+under you. Editors stage their changes and write once on **Save** — leaving the page discards
+a draft.
+
+Two honest caveats:
+
+- **Nested structures are JSON text fields.** DSH's shared form primitives render single
+  string/number controls; there is no nested object or array editor. So `reviewers` and `modes`
+  are edited as JSON, with validation that blocks saving on malformed input or a wrong type.
+  Everything else (`agents`, `models`, `envPassthrough`, …) stays in YAML.
+- **The form is the "selection" layer.** It edits the knobs above; the *definitions* of
+  reviewers and modes still live in the profile config, which remains the source of truth.
+
+Under the hood: the host half declares a [schemastery](https://github.com/shigma/schemastery)
+`Config` schema whose fields are marked `.volatile()`, because `dsh-settings` only projects
+volatile fields into a form. The browser half (`client/client.js`) registers that form on the
+Plugin page's own configuration slots and reuses DSH's `SettingsForm` / `SettingsFormModel`
+primitives, so the interaction is the same one the official settings pages use.
+
+If schemastery cannot be resolved at load time (the plugin is linked, so Node resolves imports
+from the repo directory rather than the profile), the plugin still works — there is simply no
+GUI form, and the tool description says so.
+
 ## Review modes
 
 A **mode** is a named bundle of: how hard to look (`strength`), what to say (`prompt`), who to
@@ -354,13 +393,13 @@ Every key is optional; defaults live in `lib/settings.js`.
 | --- | --- | --- |
 | `agents` | `[]` | shorthand list of `cli` reviewers; `id` defaults to the preset name |
 | `models` | `[]` | shorthand list of `llm` reviewers; `id` defaults to the model name |
-| `reviewers` | `[]` | full reviewer definitions (see below); wins over a shorthand with the same id |
-| `discover` | `{ enabled: false, adHoc: true, … }` | pull models straight from DSH's provider config instead of re-declaring them (see [Model discovery](#model-discovery)) |
-| `defaultReviewers` | all enabled | reviewer ids used when the tool call does not pass `reviewers` |
-| `defaultMode` | none | mode applied when the tool call does not pass `mode` |
-| `modes` | `{}` | named review modes |
-| `injectPolicy` | `false` | write each mode's `when` rule into the system prompt |
-| `language` | `auto` | `zh` / `en` / `auto` — output language (`auto` follows `instructions`, Chinese when there is none) |
+| `reviewers` | `[]` | full reviewer definitions (see below); wins over a shorthand with the same id; GUI-editable as JSON |
+| `discover` | `{ enabled: false, adHoc: true, … }` | pull models straight from DSH's provider config instead of re-declaring them (see [Model discovery](#model-discovery)); editable in the GUI |
+| `defaultReviewers` | all enabled | reviewer ids used when the tool call does not pass `reviewers`; editable in the GUI |
+| `defaultMode` | none | mode applied when the tool call does not pass `mode`; editable in the GUI |
+| `modes` | `{}` | named review modes; GUI-editable as JSON |
+| `injectPolicy` | `false` | write each mode's `when` rule into the system prompt; editable in the GUI |
+| `language` | `auto` | `zh` / `en` / `auto` — output language (`auto` follows `instructions`, Chinese when there is none); editable in the GUI |
 | `waitMs` | `120000` | how long the tool blocks before handing back a job id; `0` = return immediately |
 | `hardTimeoutMs` | `3600000` | wall-clock ceiling for the whole review; `0` = unlimited |
 | `maxResultChars` | `80000` | cap on the report returned to the model; longer reports are head/tail truncated with a path to the full file |
@@ -521,6 +560,7 @@ node selftest.mjs
   disappears from the reviewer set on the next call (that is the point — no stale copy).
 - `discover` expands whatever `listModels()` reports. A provider that reports hundreds of
   models will make the tool description and default set unwieldy; use `include`/`exclude`.
+- The GUI form exposes single-value controls, so `reviewers` / `modes` are JSON text fields there.
 - `when` is a system-prompt statement of policy, not an enforcement gate.
 
 ## License

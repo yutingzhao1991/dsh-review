@@ -37,6 +37,7 @@ flowchart LR
 - [快速开始](#快速开始)
 - [三种评审者](#三种评审者)
 - [模型发现](#模型发现)
+- [在 GUI 里配置](#在-gui-里配置)
 - [评审模式](#评审模式)
 - [配置项](#配置项)
 - [一次调用是怎么跑的](#一次调用是怎么跑的)
@@ -283,6 +284,30 @@ reviewers:
 如果配置里**只有** `discover`、没有任何静态评审者，那么发现出来的集合就是默认集合——否则
 「不传参数调 `review()`」会变成一个没有意义的空集合。
 
+## 在 GUI 里配置
+
+不一定要手改 YAML。打开侧边栏的 **Plugins**，找到 **dsh-review**，进它的行页面（或包卡片）——那一页就是这个插件配置的表单。
+
+表单里有什么：
+
+| 分组 | 字段 |
+| --- | --- |
+| 评审行为 | 默认评审者、默认模式、输出语言、是否注入策略 |
+| 预算与超时 | 前台等待、硬超时、报告/diff/单文件/未跟踪文件/argv 字节上限 |
+| 模型发现 | 展开开关、provider 列表、include/exclude glob、标签模板、是否进默认集合、按需指名开关 |
+| 高级（JSON） | `reviewers` 与 `modes`，以 JSON 文本编辑 |
+
+保存走的是 DSH 自己的设置机制：改动写进 profile 的 patch（`cordis.patch.yml`）并立即生效，文档在你编辑期间被别处改动时会拒绝覆盖。表单是**暂存式**的：点「保存」才写一次，离开页面就丢弃草稿。
+
+两个要说清的地方：
+
+- **嵌套结构是 JSON 文本框。** DSH 的公共表单控件只有单值输入，没有嵌套对象/数组编辑器，所以 `reviewers` 与 `modes` 用 JSON 编辑——非法 JSON 或类型不对会让保存被拦住并提示。其余键（`agents`、`models`、`envPassthrough` 等）仍只在 YAML 里。
+- **表单管的是「选用」层。** 它改的是上面那些旋钮；评审者与模式的**定义**仍在 profile 配置里，那份配置始终是唯一事实来源。
+
+实现上：宿主半边声明了一份 [schemastery](https://github.com/shigma/schemastery) 的 `Config` schema，字段都标了 `.volatile()`——因为 `dsh-settings` 只会把 volatile 字段投影成表单。浏览器半边（`client/client.js`）把这个表单注册到 Plugins 页自己的配置槽位，并复用 DSH 官方的 `SettingsForm` / `SettingsFormModel` 组件，所以交互和官方设置页完全一致。
+
+如果加载时解析不到 schemastery（插件是 link 进来的，Node 按仓库目录解析依赖），插件照常工作——只是没有 GUI 表单，工具描述里会写明这一点。
+
 ## 评审模式
 
 一个**模式**就是一束命名配置：盯得多严（`strength`）、额外说什么（`prompt`）、用谁
@@ -333,13 +358,13 @@ config:
 | --- | --- | --- |
 | `agents` | `[]` | `cli` 评审者简写；`id` 默认取预设名 |
 | `models` | `[]` | `llm` 评审者简写；`id` 默认取模型名 |
-| `reviewers` | `[]` | 完整评审者定义（见下）；同 id 时覆盖简写 |
-| `discover` | `{ enabled: false, adHoc: true, … }` | 直接用 DSH provider 配置里的模型，不必在这里再抄一遍（见[模型发现](#模型发现)） |
-| `defaultReviewers` | 全部启用 | 工具调用没给 `reviewers` 时用的 id 集合 |
-| `defaultMode` | 不设 | 工具调用没给 `mode` 时套的模式 |
-| `modes` | `{}` | 命名评审模式 |
-| `injectPolicy` | `false` | 把各模式的 `when` 规则写进系统提示词 |
-| `language` | `auto` | `zh` / `en` / `auto` 输出语言（`auto` 跟随 `instructions`，没有指令时用中文） |
+| `reviewers` | `[]` | 完整评审者定义（见下）；同 id 时覆盖简写；GUI 里以 JSON 编辑 |
+| `discover` | `{ enabled: false, adHoc: true, … }` | 直接用 DSH provider 配置里的模型，不必在这里再抄一遍（见[模型发现](#模型发现)）；可在 GUI 里改 |
+| `defaultReviewers` | 全部启用 | 工具调用没给 `reviewers` 时用的 id 集合；可在 GUI 里改 |
+| `defaultMode` | 不设 | 工具调用没给 `mode` 时套的模式；可在 GUI 里改 |
+| `modes` | `{}` | 命名评审模式；GUI 里以 JSON 编辑 |
+| `injectPolicy` | `false` | 把各模式的 `when` 规则写进系统提示词；可在 GUI 里改 |
+| `language` | `auto` | `zh` / `en` / `auto` 输出语言（`auto` 跟随 `instructions`，没有指令时用中文）；可在 GUI 里改 |
 | `waitMs` | `120000` | 前台等待时长，超时交回 job id；`0` 表示不等待、直接交回 |
 | `hardTimeoutMs` | `3600000` | 整次评审的兜底墙钟上限；`0` 为不限制 |
 | `maxResultChars` | `80000` | 回给模型的报告上限，超出按首尾截断并给出完整报告路径 |
@@ -484,6 +509,7 @@ node selftest.mjs
   （这正是目的：插件里没有过期的副本）。
 - `discover` 展开的是 `listModels()` 报出来的全部内容。如果某个 provider 报了上百个模型，工具
   描述与默认集合会变得臃肿，请用 `include` / `exclude` 收窄。
+- GUI 表单只有单值控件，所以 `reviewers` / `modes` 在那里是 JSON 文本框。
 - `when` 是系统提示词里的要求，不是强制闸门。
 
 ## License

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "代码评审工具",
-    "description": "给智能体一个通用的 review 工具：把代码评审派给 codex/claude 等 CLI 智能体、DSH 自己调用其他模型（百炼 qwen/glm 等），或一个只读子智能体。评审者与评审模式都由 config 配置。"
+    "description": "给智能体一个通用的 review 工具：评审者可以是 codex/claude 等 CLI 智能体、DSH 自己调用其他模型（百炼 qwen/glm/kimi 等），或一个只读子智能体。评审者与评审模式在 profile 配置，也可以在 GUI 的 Plugins 页直接改。"
   }
 }
