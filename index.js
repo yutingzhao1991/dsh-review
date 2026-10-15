@@ -288,6 +288,8 @@ export function apply(ctx, config) {
 							if (changes.isRepo && !gitBroke && changes.summary.empty) {
 								const empty = ['## 评审范围', '', `- 范围：${describeTarget(target)}`, '- 未检测到需要评审的改动（该范围内没有文件变化）。'].join('\n');
 								job.append(empty, { channel: 'stdout' });
+								// 短路也不能漏临时目录：它在 ctx.jobs.start 之前就建好了。
+								await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
 								return { status: 'completed', detail: '没有改动' };
 							}
 
@@ -363,6 +365,8 @@ export function apply(ctx, config) {
 						} catch (error) {
 							const detail = messageOf(error);
 							job.append(`[review 失败] ${detail}`, { channel: 'stdout' });
+							// 失败路径不引用任何落盘文件，直接收掉临时目录。
+							await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
 							return { status: 'failed', detail };
 						} finally {
 							if (timer !== undefined) clearTimeout(timer);

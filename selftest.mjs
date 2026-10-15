@@ -8,11 +8,17 @@
  * - 变更收集：git 摘要、diff 包按需收集、未跟踪文件正文；
  * - 编排：就地返回 / 后台返回 / 纯后台 / 失败收敛 / 汇总 / 截断 / 系统提示词注入。
  */
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const PLUGIN = new URL('./index.js', import.meta.url).href;
+
+/** 统计 $TMPDIR 里属于本插件的临时目录：整轮自测跑完必须一个不多（不含自测自己的 scratch 目录）。 */
+function countWorkDirs() {
+	return readdirSync(tmpdir()).filter((name) => name.startsWith('dsh-review-') && !name.startsWith('dsh-review-selftest-')).length;
+}
+const WORKDIRS_BEFORE = countWorkDirs();
 
 /* ────────────────────────────── 假 ctx ────────────────────────────── */
 
@@ -545,6 +551,9 @@ console.log('\nF. 编排');
 		const match = value.report.match(/完整报告：(\S+?)\]/);
 		return match !== null && readFileSync(match[1], 'utf8').length > 500;
 	})());
+	// 截断会刻意保留临时目录；自测自己负责收尾，好让最后的「零泄漏」总账成立。
+	const kept = value.report.match(/完整报告：(\S+?)\]/);
+	if (kept !== null) rmSync(join(kept[1], '..'), { recursive: true, force: true });
 }
 {
 	// 系统提示词注入：默认关闭；打开后才注册 section。
@@ -658,8 +667,7 @@ console.log('\nH. 回归');
 }
 {
 	// 未截断时清掉临时目录；截断时保留（结果里引用了路径）。
-	const { readdirSync } = await import('node:fs');
-	const count = () => readdirSync(tmpdir()).filter((name) => name.startsWith('dsh-review-')).length;
+	const count = countWorkDirs;
 	const before = count();
 	const short = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, report: '短结论' } });
 	await run(short, {});
@@ -671,6 +679,14 @@ console.log('\nH. 回归');
 	check('H 截断时临时目录保留并可读', afterLong === before + 1 && value.report.includes('完整报告：'), `${afterShort} → ${afterLong}`);
 	const match = value.report.match(/完整报告：(\S+?)\]/);
 	if (match !== null) rmSync(join(match[1], '..'), { recursive: true, force: true });
+	check('H 清理后回到基线', countWorkDirs() === before, `${afterLong} → ${countWorkDirs()}`);
+
+	// 整轮自测的总账：短路、失败、取消这些路径也都不许漏临时目录。
+	// 后台 job 的清理是异步的，先让在途的 done 结算完再数。
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	const leaked = countWorkDirs();
+	const leakedNames = readdirSync(tmpdir()).filter((name) => name.startsWith('dsh-review-'));
+	check('H 整轮自测没有泄漏临时目录', leaked === WORKDIRS_BEFORE, `${WORKDIRS_BEFORE} → ${leaked}: ${leakedNames.join(', ')}`);
 }
 
 {
