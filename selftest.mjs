@@ -745,6 +745,8 @@ console.log('\nH. 回归');
 	const spec = big.state.spawns.find((entry) => entry.argv[0] === '/fake/claude');
 	const promptArg = spec.argv.at(-1);
 	check('H 大 diff 下 prompt 参数受限于 maxArgBytes', Buffer.byteLength(promptArg, 'utf8') <= 96 * 1024, `${Buffer.byteLength(promptArg, 'utf8')}`);
+	const bigValue = await run(big, {});
+	check('H argv 截断在报告里可见', bigValue.report.includes('单参数') && bigValue.report.includes('claude'), bigValue.report.slice(-400));
 }
 
 {

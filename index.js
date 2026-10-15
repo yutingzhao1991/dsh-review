@@ -300,6 +300,8 @@ export function apply(ctx, config) {
 
 							// 只进报告脚注、不进评审者提示词：这条是给读结论的人看的。
 							const reportNotes = [...changes.notes];
+							/** 提示词被 argv 字节闸截断的评审者 id。 */
+							const argvTruncated = [];
 							const rangeFirst = reviewers.filter((reviewer) => reviewer.promptReplacesRange);
 							if (scopeGiven && nativePrompt !== undefined && rangeFirst.length > 0) {
 								reportNotes.push(
@@ -310,11 +312,19 @@ export function apply(ctx, config) {
 							const outcomes = await Promise.all(
 								reviewers.map((reviewer, index) => {
 									// 以 argv 投递提示词的评审者要过单参数字节闸，stdin 投递不受限。
+									// 截断会被记进报告脚注：评审者看到的材料比别人少这件事必须可见。
 									let promptText;
 									if (reviewer.kind === 'cli') {
-										if (reviewer.promptReplacesRange) promptText = scopeGiven ? undefined : nativePrompt;
-										else if (reviewer.promptVia === 'stdin') promptText = briefText;
-										else promptText = clampForArgv(briefText, settings.maxArgBytes).text;
+										if (reviewer.promptVia === 'stdin') promptText = reviewer.promptReplacesRange ? (scopeGiven ? undefined : nativePrompt) : briefText;
+										else {
+											const raw = reviewer.promptReplacesRange ? (scopeGiven ? undefined : nativePrompt) : briefText;
+											if (raw === undefined) promptText = undefined;
+											else {
+												const clamped = clampForArgv(raw, settings.maxArgBytes);
+												if (clamped.clamped) argvTruncated.push(reviewer.id);
+												promptText = clamped.text;
+											}
+										}
 									}
 									return runReviewer(ctx, reviewer, {
 										cwd,
@@ -329,6 +339,12 @@ export function apply(ctx, config) {
 									});
 								}),
 							);
+
+							if (argvTruncated.length > 0) {
+								reportNotes.push(
+									`${[...new Set(argvTruncated)].join('、')}：提示词超过单参数 ${settings.maxArgBytes} 字节上限，diff 被截断后才交给 CLI。这些评审者看到的材料比其他人少——「没有问题」不等于覆盖了全部改动；要看完整 diff 请调小 maxDiffChars 分批评审，或改用 llm / subagent 评审者。`,
+								);
+							}
 
 							// 可选的汇总：把多份结论合并、去重、标注共识。
 							let synthesis;
