@@ -286,25 +286,24 @@ reviewers:
 
 ## 在 GUI 里配置
 
-不一定要手改 YAML。打开侧边栏的 **Plugins**，找到 **dsh-review**，进它的行页面（或包卡片）——那一页就是这个插件配置的表单。
+不一定要手改 YAML。打开侧边栏的 **Plugins**，找到 **dsh-review**，进它的行页面（或包卡片）——
+那一页就是这个插件的配置表单，而且**能选的地方都让你选，不让你填**。
 
-表单里有什么：
-
-| 分组 | 字段 |
+| 分组 | 控件 |
 | --- | --- |
-| 评审行为 | 默认评审者、默认模式、输出语言、是否注入策略 |
-| 预算与超时 | 前台等待、硬超时、报告/diff/单文件/未跟踪文件/argv 字节上限 |
-| 模型发现 | 展开开关、provider 列表、include/exclude glob、标签模板、是否进默认集合、按需指名开关 |
-| 高级（JSON） | `reviewers` 与 `modes`，以 JSON 文本编辑 |
+| 评审行为 | 语言是三选一；是否注入评审策略是开关；默认模式是**你定义过的模式的**下拉；默认评审者是**你定义过的评审者的**多选 |
+| 评审者与模式 | 结构化编辑器：增删行、`类型` 用分段控件选、**provider / 模型从宿主实时目录里选**，不用背模型名 |
+| 模型发现 | 开关、**由宿主目录喂出来的 provider 多选**、glob 黑白名单、标签模板 |
+| 预算与超时 | 数字预填**当前实际生效**的值，而不是一片空白 |
 
-保存走的是 DSH 自己的设置机制：改动写进 profile 的 patch（`cordis.patch.yml`）并立即生效，文档在你编辑期间被别处改动时会拒绝覆盖。表单是**暂存式**的：点「保存」才写一次，离开页面就丢弃草稿。
+几个要点：
 
-两个要说清的地方：
+- **provider / 模型列表来自 DSH 自己。** 页面向宿主要模型目录（`remote.session.modelCatalog`），所以「模型」是你在 DSH 里配的那些模型的下拉。目录读不到时，这两个控件会退回手填，并在页面上写明原因。
+- **评审者与模式是结构化编辑器，另留 JSON 兜底。** DSH 的公共表单控件没有嵌套编辑器，所以这一页自己渲染行编辑器（增删行 + 逐字段控件），写回去的仍是 YAML 里那份一样的 JSON 值。折叠的「**显示原始 JSON**」可以直接改它；JSON 非法或缺 `id` 会拦住保存并说明原因。
+- **表单没覆盖的键仍在 YAML 里** —— `agents`、`models`、`envPassthrough` 等。profile 配置始终是唯一事实来源，保存只是重写被暴露的那些键。
+- **保存**走 DSH 自己的设置机制：写进 profile 的 patch（`cordis.patch.yml`）并立即生效，文档在你编辑期间被别处改动会拒绝覆盖。表单是暂存式的：点「保存」才写一次，离开页面丢弃草稿。
 
-- **嵌套结构是 JSON 文本框。** DSH 的公共表单控件只有单值输入，没有嵌套对象/数组编辑器，所以 `reviewers` 与 `modes` 用 JSON 编辑——非法 JSON 或类型不对会让保存被拦住并提示。其余键（`agents`、`models`、`envPassthrough` 等）仍只在 YAML 里。
-- **表单管的是「选用」层。** 它改的是上面那些旋钮；评审者与模式的**定义**仍在 profile 配置里，那份配置始终是唯一事实来源。
-
-实现上：宿主半边声明了一份 [schemastery](https://github.com/shigma/schemastery) 的 `Config` schema，字段都标了 `.volatile()`——因为 `dsh-settings` 只会把 volatile 字段投影成表单。浏览器半边（`client/client.js`）把这个表单注册到 Plugins 页自己的配置槽位，并复用 DSH 官方的 `SettingsForm` / `SettingsFormModel` 组件，所以交互和官方设置页完全一致。
+实现上：宿主半边声明了一份 [schemastery](https://github.com/shigma/schemastery) 的 `Config` schema，字段都标了 `.volatile()`——因为 `dsh-settings` 只会把 volatile 字段投影成表单。浏览器半边（`client/client.js`）把这个表单注册到 Plugins 页自己的配置槽位，并复用 DSH 官方的 `SettingsForm` / `SettingsFormModel`，所以暂存、保存与冲突处理都和官方设置页一致。
 
 如果加载时解析不到 schemastery（插件是 link 进来的，Node 按仓库目录解析依赖），插件照常工作——只是没有 GUI 表单，工具描述里会写明这一点。
 
@@ -509,7 +508,7 @@ node selftest.mjs
   （这正是目的：插件里没有过期的副本）。
 - `discover` 展开的是 `listModels()` 报出来的全部内容。如果某个 provider 报了上百个模型，工具
   描述与默认集合会变得臃肿，请用 `include` / `exclude` 收窄。
-- GUI 表单只有单值控件，所以 `reviewers` / `modes` 在那里是 JSON 文本框。
+- DSH 没有通用的嵌套对象控件，所以 GUI 里的 `reviewers` / `modes` 是插件自绘的行编辑器，并保留一个原始 JSON 兜底入口。
 - `when` 是系统提示词里的要求，不是强制闸门。
 
 ## License

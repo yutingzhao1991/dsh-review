@@ -306,36 +306,39 @@ becomes the default — otherwise "call `review()` with no arguments" would mean
 ## Configure in the GUI
 
 You do not have to hand-edit YAML. Open **Plugins** in the Web sidebar, pick **dsh-review**,
-and open its row (or the bundle card): the page renders a form for this plugin's config.
+and open its row (or the bundle card): that page renders a form for this plugin's config, and
+it prefers selection over typing.
 
-What you get there:
-
-| Group | Fields |
+| Group | Controls |
 | --- | --- |
-| Review behaviour | default reviewers, default mode, output language, policy injection |
-| Budgets and timeouts | foreground wait, hard timeout, report/diff/per-file/untracked caps, argv byte cap |
-| Model discovery | expand switch, providers, include/exclude globs, label template, default-set, ad-hoc switch |
-| Advanced (JSON) | `reviewers` and `modes` as JSON text |
+| Review behaviour | language as a segmented control, mandatory-review injection as a switch, default mode as a **dropdown of the modes you defined**, default reviewers as a **multi-select of the reviewers you defined** |
+| Reviewers and modes | structured editors: add/remove rows, pick `kind` from a segmented control, and pick **provider / model from the live host catalog** — no model names to type |
+| Model discovery | switches, a **provider multi-select fed by the host catalog**, glob allow/deny lists, label template |
+| Budgets and timeouts | numbers pre-filled with the values actually in effect |
 
-Saving writes through DSH's own settings machinery: the edit lands in the profile patch
-(`cordis.patch.yml`) and is applied immediately, with conflict detection if the document moved
-under you. Editors stage their changes and write once on **Save** — leaving the page discards
-a draft.
+Things worth knowing:
 
-Two honest caveats:
+- **Provider and model lists come from DSH itself.** The page asks the host for its model
+  catalog (`remote.session.modelCatalog`), so a reviewer's model is a dropdown over what your
+  DSH providers actually serve. If that catalog cannot be read, those controls degrade to text
+  inputs and the page says so.
+- **Reviewers and modes are structured editors with a JSON escape hatch.** Nested structures
+  have no generic form control in DSH, so the page renders its own row editors (add/remove,
+  per-field controls) and writes the result back as the same JSON value the YAML uses. A
+  collapsible **Show raw JSON** control edits that value directly; malformed JSON or a missing
+  reviewer `id` blocks the save with an explanation.
+- **Keys the form does not cover stay in YAML** — `agents`, `models`, `envPassthrough`, and
+  anything else outside the exposed field set. The profile config remains the source of truth;
+  a save just rewrites the exposed keys.
+- **Saving** goes through DSH's own settings machinery: the edit lands in the profile patch
+  (`cordis.patch.yml`) and is applied immediately, with conflict detection if the document moved
+  under you. Editors stage their changes and write once on **Save**; leaving discards a draft.
 
-- **Nested structures are JSON text fields.** DSH's shared form primitives render single
-  string/number controls; there is no nested object or array editor. So `reviewers` and `modes`
-  are edited as JSON, with validation that blocks saving on malformed input or a wrong type.
-  Everything else (`agents`, `models`, `envPassthrough`, …) stays in YAML.
-- **The form is the "selection" layer.** It edits the knobs above; the *definitions* of
-  reviewers and modes still live in the profile config, which remains the source of truth.
-
-Under the hood: the host half declares a [schemastery](https://github.com/shigma/schemastery)
+Under the hood the host half declares a [schemastery](https://github.com/shigma/schemastery)
 `Config` schema whose fields are marked `.volatile()`, because `dsh-settings` only projects
 volatile fields into a form. The browser half (`client/client.js`) registers that form on the
-Plugin page's own configuration slots and reuses DSH's `SettingsForm` / `SettingsFormModel`
-primitives, so the interaction is the same one the official settings pages use.
+Plugin page's own configuration slots and builds on DSH's `SettingsForm` / `SettingsFormModel`
+primitives, so staging, saving, and conflict handling match the official settings pages.
 
 If schemastery cannot be resolved at load time (the plugin is linked, so Node resolves imports
 from the repo directory rather than the profile), the plugin still works — there is simply no
@@ -560,7 +563,7 @@ node selftest.mjs
   disappears from the reviewer set on the next call (that is the point — no stale copy).
 - `discover` expands whatever `listModels()` reports. A provider that reports hundreds of
   models will make the tool description and default set unwieldy; use `include`/`exclude`.
-- The GUI form exposes single-value controls, so `reviewers` / `modes` are JSON text fields there.
+- DSH has no generic nested-object control, so the GUI renders its own row editors for `reviewers` / `modes` and keeps a raw-JSON fallback instead of a schema-driven form.
 - `when` is a system-prompt statement of policy, not an enforcement gate.
 
 ## License
