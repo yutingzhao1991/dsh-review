@@ -1,0 +1,27 @@
+{
+  "name": "dsh-review",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSH host plugin: a generic `review` tool that fans code review out to CLI agents, other models, and DSH subagents",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "lib/*.js",
+    "selftest.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

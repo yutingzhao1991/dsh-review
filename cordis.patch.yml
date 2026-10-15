@@ -1,0 +1,20 @@
+# dsh-review bundle patch：把 Host 插件插进当前 profile。
+#
+# 需要改可调项时，不要改本文件，改 profile 自己的 patch 层
+# （~/.dsh/profiles/<profile>/cordis.patch.yml）按 id 覆盖 config，例如：
+#
+#   - id: review
+#     config:
+#       defaultMode: strict
+#       agents:
+#         - preset: codex
+#           model: gpt-5.6-sol
+#       models:
+#         - provider: bainian
+#           model: qwen3.8-max
+#           label: Qwen3.8-Max
+#
+# 覆盖是整块替换 config（不做深合并），未写的键由插件内置默认值补齐。
+- insert:
+    - id: review
+      name: dsh-review
