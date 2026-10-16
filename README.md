@@ -148,11 +148,18 @@ knowing:
 
 - Reviews always run in the **session's working directory**; you cannot point them elsewhere.
 - One call reviews one scope (uncommitted / a base branch / a commit), matching the underlying
-  CLIs. Naming a range and passing `instructions` at the same time is rejected — put the focus
+  CLIs. `base` and `commit` are mutually exclusive. A range plus `instructions` works for
+  subagents but not for the codex CLI (its range flag and PROMPT exclude each other): if every
+  selected reviewer is such a CLI the call is rejected up front, otherwise the CLI ones are named
+  in the report footnotes — put the focus
   in a mode's `prompt` instead.
 - A mode's prompt reaches codex only when no range is given (its CLI refuses both at once); the
   range is always honoured, and the report says when the prompt was skipped.
 - codex only runs inside the directories it trusts (`~/.codex/config.toml`).
+- An invalid `base`/`commit` fails before any reviewer starts, instead of running for minutes and
+  reporting a batch that reviewed nothing.
+- Report scaffolding (headings, footnotes, errors) is Chinese; `language` only controls the
+  reviewers' own instructions.
 - Truncated reports stay in `$TMPDIR/dsh-review-*/report.md`; other runs clean up after
   themselves.
 

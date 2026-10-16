@@ -33,6 +33,9 @@ function defaultGitScript(cwd) {
 	return [
 		{ argv: ['git', 'rev-parse', '--is-inside-work-tree'], stdout: 'true\n' },
 		{ argv: ['git', 'rev-parse', '--show-toplevel'], stdout: `${cwd}\n` },
+		// 范围校验：插件现在会先 rev-parse --verify 确认 base/commit 存在（无效就快速失败）。
+		// 用例里用到的 revision 都当作存在；G2 段专门覆盖「不存在」的那条路。
+		...['main', 'abc', 'abc123', 'HEAD~1'].map((rev) => ({ argv: ['git', 'rev-parse', '--verify', '--quiet', `${rev}^{commit}`], stdout: `${rev}\n` })),
 		{ argv: ['git', '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-z', '-uall'], stdout: ' M src/a.js\0?? src/b.js\0' },
 		{ argv: ['git', '-c', 'core.quotepath=false', 'diff', '--numstat'], stdout: '10\t2\tsrc/a.js\n' },
 		{ argv: ['git', '-c', 'core.quotepath=false', 'diff', '--cached', '--numstat'], stdout: '' },
@@ -74,7 +77,7 @@ function makeHarness(options = {}) {
 		// `--output-last-message <path>`：CLI 把结论写进文件。
 		const reportFlag = spec.argv.indexOf('--output-last-message');
 		const reportPath = reportFlag >= 0 ? spec.argv[reportFlag + 1] : undefined;
-		if (reportPath !== undefined && options.report !== undefined) writeFileSync(reportPath, options.report);
+		if (reportPath !== undefined && options.report !== undefined && options.skipReportFile !== true) writeFileSync(reportPath, options.report);
 		const reader = (text) => ({ readFrom: () => ({ text, lossy: false, nextOffset: text.length, spillPath: `/spill/${text.length}` }) });
 		// spawnDelayMs：把评审者做成「慢的」，用来看心跳/超时这类跟时间有关的行为。
 		const delay = options.spawnDelayMs ?? 0;
@@ -317,7 +320,12 @@ console.log('\nB. 工具描述与参数校验');
 	check('B presentCall 是 terminal 卡片', h.definition.presentCall({ reviewers: ['codex'], base: 'main' }).title === 'review(codex) --base main');
 
 	await rejects('B 拒绝 base+commit', () => run(h, { base: 'main', commit: 'abc' }));
-	await rejects('B 拒绝 base+instructions', () => run(h, { base: 'main', instructions: 'x' }));
+	// 互斥按「评审者能不能同时收范围与关注点」判：codex 的 CLI 不能（PROMPT 与范围开关互斥），
+	// claude 这类不带范围开关的预设则可以。所以用纯 codex 覆盖这条错路。
+	{
+		const cli = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, report: 'x' } });
+		await rejects('B 拒绝 base+instructions（全是不支持二者的 CLI）', () => run(cli, { base: 'main', instructions: 'x' }));
+	}
 	await rejects('B 拒绝 instructions=-', () => run(h, { instructions: '-' }));
 	await rejects('B 拒绝超长 base', () => run(h, { base: 'a'.repeat(300) }));
 	await rejects('B 拒绝以 - 开头的 base（会被 git 当开关）', () => run(h, { base: '--cached' }));
@@ -351,6 +359,18 @@ console.log('\nC. CLI 评审者');
 		check('C 报告标题不塞绝对路径', heading.includes('（cli, codex') && !heading.includes('/'), heading);
 	}
 	check('C codex 不喂 diff（needsPacket=false）', !h.state.spawns.some((spec) => spec.argv.includes('--no-color') && spec.argv.includes('diff')), JSON.stringify(h.state.spawns.map((s) => s.argv.slice(0, 5))));
+	// 实测 1/5 次：codex 写不出报告文件（Failed to write last message file），但 stdout 里
+	// 有完整结论——不能因为文件缺失就白丢一份评审。
+	{
+		const broken = await loadPlugin({
+			plugin: { agents: [{ preset: 'codex' }] },
+			harness: { ...GIT, stdout: 'Codex 的完整结论\n\n<details>诊断输出</details>', skipReportFile: true },
+		});
+		const fallback = await run(broken, {});
+		check('C 报告文件缺失时回退 stdout', fallback.report.includes('Codex 的完整结论'), fallback.report.slice(0, 300));
+		check('C 回退时剥掉诊断块', !fallback.report.includes('<details>诊断输出</details>'));
+		check('C 回退写进材料说明', fallback.report.includes('从 stdout 回退提取'), fallback.report.slice(-500));
+	}
 	check('C ring 里就是报告', h.state.jobs.get('review-1') === undefined, '就地返回后 job 应被移除');
 }
 {
@@ -517,6 +537,8 @@ console.log('\nF. 编排');
 	// gemini 用 stdout capture，返回空 → failed。
 	const value = await run(h, {});
 	check('F 部分失败仍是 completed', value.kind === 'completed' && value.status === 'completed', JSON.stringify(value).slice(0, 200));
+	// 失败不能只埋在分节标题里：报告头要给出「几个成功 / 几个失败」。
+	check('F 报告头给出成功/失败统计', value.report.includes('1 成功 / 1 失败'), value.report.slice(0, 400));
 	check('F 报告里有失败者', value.report.includes('**失败**') && value.report.includes('没有输出结论'), value.report.slice(0, 400));
 }
 {
@@ -617,6 +639,82 @@ console.log('\nG. 边界');
 	const one = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }, { preset: 'claude' }], defaultReviewers: ['claude'] }, harness: { ...GIT, stdout: '结论' } });
 	const valueOne = await run(one, {});
 	check('G 勾选决定默认集合', valueOne.reviewers.join(',') === 'claude', valueOne.reviewers.join(','));
+}
+
+/* ────────────────────────────── G2. 范围校验（快速失败） ────────────────────────────── */
+
+console.log('\nG2. 范围校验');
+{
+	// 实测：base 写成不存在的分支时，git 先失败（只记 note），照样花 140 秒起 codex，
+	// 最后报 completed 却什么都没评。现在起 job 之前就校验。
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: {
+			...GIT,
+			report: 'x',
+			gitScript: [...defaultGitScript(WORK), { argv: ['git', 'rev-parse', '--verify', '--quiet', 'no-such-branch-xyz^{commit}'], exitCode: 128, stderr: 'fatal: bad revision' }],
+		},
+	});
+	const dirsBefore = countWorkDirs();
+	await rejects('G2 无效 base 快速失败', () => run(h, { base: 'no-such-branch-xyz' }));
+	check('G2 无效 base 没有起评审者', h.state.spawns.every((spec) => spec.argv[0] !== '/fake/codex'), JSON.stringify(h.state.spawns.map((s) => s.argv[0])));
+	check('G2 无效 base 没有建临时目录', countWorkDirs() === dirsBefore, `${dirsBefore} → ${countWorkDirs()}`);
+}
+
+/* ────────────────────────────── G3. 范围 + 关注点 ────────────────────────────── */
+
+console.log('\nG3. 范围 + 关注点');
+{
+	// subagent 能同时收范围和关注点；codex 这类 CLI 不能（PROMPT 与范围开关互斥）。
+	const subagentCalls = [];
+	const subServices = {
+		subagents: {
+			getProvider: (name) => (name === 'spawn' ? { name: 'spawn' } : undefined),
+			resolveMaxDepth: (depth) => depth,
+			async start(name, request) {
+				subagentCalls.push({ name, request });
+				return { result: Promise.resolve({ output: [{ type: 'text', text: '子智能体结论' }], stopReason: 'completed' }), dispose: async () => {} };
+			},
+		},
+	};
+	const sub = await loadPlugin({
+		plugin: { reviewers: [{ id: 'sub', kind: 'subagent', provider: 'spawn' }], defaultReviewers: ['sub'], modes: { deep: { strength: 'deep' } } },
+		harness: { ...GIT, services: subServices },
+	});
+	const value = await run(sub, { base: 'main', instructions: '只看并发' });
+	check('G3 子智能体允许范围 + 关注点', value.status === 'completed', JSON.stringify(value).slice(0, 200));
+	const prompt = subagentCalls[0]?.request.prompt[0].text ?? '';
+	check('G3 关注点真的传给了子智能体', prompt.includes('只看并发'), prompt.slice(0, 200));
+
+	// 全部都是 CLI 时才报错，且错误里点名是哪些评审者。
+	const cli = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, report: 'x' } });
+	await rejects('G3 全是 CLI 时范围 + 关注点报错', () => run(cli, { base: 'main', instructions: '只看并发' }));
+
+	// 混合集合：放行，并在材料说明里点名没收到关注点的那个。
+	const mixed = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }], reviewers: [{ id: 'sub', kind: 'subagent', provider: 'spawn' }] },
+		harness: { ...GIT, report: 'x', services: subServices },
+	});
+	const out = await run(mixed, { base: 'main', instructions: '只看并发' });
+	check('G3 混合集合放行', out.status === 'completed', JSON.stringify(out).slice(0, 160));
+	check('G3 材料说明点名 CLI 没收到关注点', out.report.includes('instructions没有传递给它们') || out.report.includes('instructions 没有传递给它们'), out.report.slice(-600));
+}
+
+/* ────────────────────────────── G4. 假脚注 ────────────────────────────── */
+
+console.log('\nG4. 假脚注');
+{
+	// 没配任何模式、也没给 instructions 时，不该出现「提示词没有传递」的脚注。
+	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, report: 'x' } });
+	const value = await run(h, { base: 'main' });
+	check('G4 没有任何提示词时不报「没有传递」', !value.report.includes('没有传递'), value.report.slice(-500));
+	// 真给了 instructions 时才报，并说明是 instructions。
+	const withPrompt = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }], modes: { deep: { strength: 'deep' } } },
+		harness: { ...GIT, report: 'x' },
+	});
+	const out = await run(withPrompt, { base: 'main', mode: 'deep' });
+	check('G4 真有模式提示词时才报', out.report.includes('模式的提示词没有传递'), out.report.slice(-600));
 }
 
 /* ────────────────────────────── H. 回归（真实评审发现的问题） ────────────────────────────── */

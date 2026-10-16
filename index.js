@@ -23,12 +23,12 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { collectChanges, describeCall, describeTarget } from './lib/changes.js';
+import { assertRevisionExists, collectChanges, describeCall, describeTarget } from './lib/changes.js';
 import { buildBrief, buildNativePrompt, buildPolicyText, flattenBrief } from './lib/prompt.js';
 import { composeReport, truncateText } from './lib/report.js';
 import { clampForArgv, runReviewer } from './lib/reviewers.js';
 import { Config, schemaAvailable, unwrapConfig } from './lib/schema.js';
-import { needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
+import { modePrompt, needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
 
 /** 加载器诊断用的插件名；`cordis.patch.yml` 里的 id 是 `review`。 */
 export const name = 'review';
@@ -113,6 +113,7 @@ function buildToolDescription(settings) {
 		'不传参数时评审工作区里 staged / unstaged / untracked 的全部改动。',
 		'参数规则：`base`、`commit`、`instructions` **三者最多给一个**（`base` 与 `commit` 互斥；给了 `base`/`commit` 就不能再给 `instructions`——codex CLI 的范围开关与 PROMPT 不能同时出现）。要「某个范围 + 附加关注点」，把关注点写进 `mode` 的提示词。',
 		'`reviewers` 只能从上面列出的评审者里选，写别的 id 会直接报错（插件没有「按需指名模型」这条路）。',
+		'单次评审不一定穷尽（同一份改动，各评审者可能各有遗漏）：要覆盖度就用 `mode` 的深度模式，或者一次多选几个评审者。',
 		'评审通常要跑几分钟：默认**立即**返回 job id（不等待），用 job_output 读结果，跑完会自动通知；调用方可自行决定什么时候放弃。',
 	);
 	return lines.join('\n');
@@ -163,9 +164,6 @@ function validateArgs(raw) {
 
 	if (base.length > 0 && commit.length > 0) {
 		throw new Error('base 与 commit 只能给一个：base 评审相对分支的改动，commit 评审某个提交的改动。');
-	}
-	if (instructions.length > 0 && (base.length > 0 || commit.length > 0)) {
-		throw new Error('base / commit 不能与 instructions 同时给：codex CLI 里自定义评审指令 [PROMPT] 与范围开关互斥。要「评某个范围 + 附加关注点」请用 mode 的 prompt。');
 	}
 	for (const [label, value] of [['base', base], ['commit', commit]]) {
 		if (value.length === 0) continue;
@@ -270,6 +268,17 @@ export function apply(ctx, config) {
 			const owner = exec.agent?.id;
 			const ids = reviewers.map((reviewer) => reviewer.id);
 			const label = describeCall(reviewers, target);
+			// 范围 + 关注点：只有 promptReplacesRange 的评审者收不了（CLI 的限制），子智能体两者都能收。
+			// 全都被限制才报错——放在起 job 之前，这样是即时的工具错误，而不是失败的后台任务。
+			const cliOnly = reviewers.filter((reviewer) => reviewer.promptReplacesRange);
+			if (target.base.length + target.commit.length > 0 && target.instructions.length > 0 && cliOnly.length === reviewers.length) {
+				throw new Error(`base / commit 不能与 instructions 同时给：选中的评审者（${cliOnly.map((reviewer) => reviewer.id).join('、')}）都是 CLI，它们的自定义评审指令 [PROMPT] 与范围开关互斥。要「范围 + 关注点」请改用 subagent 评审者，或把关注点写进 mode 的 prompt。`);
+			}
+
+			// 先确认 base/commit 真的存在：否则会白起一轮评审者，最后报 completed 却什么都没评。
+			const badRevision = await assertRevisionExists(ctx, cwd, target, exec.signal);
+			if (badRevision !== undefined) throw new Error(badRevision);
+
 			const workdir = await mkdtemp(join(tmpdir(), 'dsh-review-'));
 			const reportPath = join(workdir, 'report.md');
 
@@ -303,7 +312,7 @@ export function apply(ctx, config) {
 							const changes = await collectChanges(ctx, live, target, cwd, controller.signal, { packet: needsPacket(reviewers) });
 
 							// 没有改动就不要打扰评审者：多花几分钟、还容易换来一堆幻觉 findings。
-							const gitBroke = changes.notes.some((note) => note.includes('失败'));
+							const gitBroke = changes.gitFailed === true;
 							if (changes.isRepo && !gitBroke && changes.summary.empty) {
 								// 材料说明（例如「不是 git 仓库」）必须一起给：否则在非 git 目录里
 							// 用户只会看到「未检测到需要评审的改动」，完全不知道原因。
@@ -327,9 +336,15 @@ export function apply(ctx, config) {
 							/** 提示词被 argv 字节闸截断的评审者 id。 */
 							const argvTruncated = [];
 							const rangeFirst = reviewers.filter((reviewer) => reviewer.promptReplacesRange);
-							if (scopeGiven && nativePrompt !== undefined && rangeFirst.length > 0) {
+							const skippedIds = rangeFirst.map((reviewer) => reviewer.id);
+							const hasModePrompt = modePrompt(mode) !== undefined;
+							const hasInstructions = target.instructions.length > 0;
+							// 脚注只在「确实有东西被跳过」时出现：`nativePrompt` 现在永远有值（含输出格式），
+							// 拿它当判据会在没配任何模式/指令时也报「提示词没有传递」，纯属吓人。
+							if (scopeGiven && skippedIds.length > 0 && (hasModePrompt || hasInstructions)) {
+								const what = [hasModePrompt ? '模式的提示词' : '', hasInstructions ? 'instructions' : ''].filter((part) => part.length > 0).join(' 和 ');
 								reportNotes.push(
-									`${rangeFirst.map((reviewer) => reviewer.id).join('、')}：因为指定了 base/commit，模式的提示词没有传递——该 CLI 的 PROMPT 与范围开关互斥，而范围优先。需要「范围 + 关注点」请改用 subagent 评审者，或把关注点写进自定义 CLI 的命令模板。`,
+									`${skippedIds.join('、')}：因为指定了 base/commit，${what}没有传递给它们——该 CLI 的 PROMPT 与范围开关互斥，而范围优先。需要「范围 + 关注点」请改用 subagent 评审者，或把关注点写进自定义 CLI 的命令模板。`,
 								);
 							}
 
@@ -368,6 +383,16 @@ export function apply(ctx, config) {
 								}),
 							);
 
+							// 评审者自己带回来的说明（例如「结论是 stdout 回退来的」）。
+							for (const outcome of outcomes) {
+								if (typeof outcome.note === 'string' && outcome.note.length > 0) reportNotes.push(outcome.note);
+							}
+							// 子智能体在大 diff 上很容易烧满墙钟上限且零产出：给出可操作的下一步。
+							for (const outcome of outcomes) {
+								if (outcome.status === 'completed' || !/超时|aborted|中止/.test(String(outcome.detail ?? ''))) continue;
+								if (reviewers.find((reviewer) => reviewer.id === outcome.id)?.kind !== 'subagent') continue;
+								reportNotes.push(`${outcome.id}：子智能体在大范围上被墙钟上限中止。这个 diff 建议只用 CLI 评审者，或调高该评审者的 \`timeoutMs\`；也可以先用 \`base\`/\`commit\` 缩小范围。`);
+							}
 							clearInterval(heartbeat);
 							if (argvTruncated.length > 0) {
 								reportNotes.push(
