@@ -71,6 +71,12 @@ rather than quietly running everything.
 CLI presets: `codex`, `claude`, `gemini`, `opencode`, `cursor`, or `custom` with your own
 command template.
 
+Two things worth knowing when choosing: a `subagent` inherits the parent session's model unless
+you set `agentModel`, so it is **not** automatically a second opinion — name the model explicitly
+if you want one. And `llm` is the only kind that reaches a *different* model without handing it
+tools; it is also what a mode's `synthesize` step needs, since merging reports is one tool-free
+model call.
+
 ```yaml
 - id: review
   name: dsh-review

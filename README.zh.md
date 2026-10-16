@@ -63,6 +63,10 @@ review({ instructions: "只看并发与错误处理" })
 
 CLI 预设：`codex`、`claude`、`gemini`、`opencode`、`cursor`，或 `custom` 自定义命令模板。
 
+选的时候有两点值得知道：`subagent` 不写 `agentModel` 就会继承父会话的模型，所以它**不自动等于**
+「第二意见」——想要独立意见就显式指定模型；而 `llm` 是唯一能用**别的模型**、又不给它工具的类型，
+模式的 `synthesize` 汇总也依赖它（合并结论需要一次不带工具的模型调用）。
+
 ```yaml
 - id: review
   name: dsh-review
