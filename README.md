@@ -22,8 +22,10 @@ read one merged report.
   consensus.
 - **Review modes.** Name a strength and a prompt once (`quick`, `balanced`, `deep`, …) and reuse
   it, instead of retyping review instructions every time.
-- **Configured in the GUI.** Tick the reviewers you want; everything else stays collapsed under
-  advanced settings.
+- **Configured in the GUI, and saved for you.** Tick the reviewers you want; everything else
+  stays collapsed under advanced settings. Edits are written about half a second after you stop
+  typing — a status line at the top says where they stand, and a **Save now** button remains as a
+  manual retry.
 - **No keys, no endpoints.** Providers and credentials stay in your DSH config — this plugin
   only asks for what is already there.
 

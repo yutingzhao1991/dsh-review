@@ -959,6 +959,15 @@ async function loadClientBundle(options = {}) {
 		constructor(scope, specs) {
 			this.scope = scope;
 			this.specs = specs;
+			// 与官方模型一致的可观察状态：编辑变 dirty、保存成功清 dirty、失败保留草稿。
+			this.dirty = false;
+			this.invalid = false;
+			this.failed = false;
+			this.saving = false;
+			this.writable = options.writable ?? true;
+			this.failuresLeft = options.saveFailures ?? 0;
+			this.saveCalls = 0;
+			this.discardCalls = 0;
 			captured.models.push(this);
 		}
 		bind(project) {
@@ -966,7 +975,7 @@ async function loadClientBundle(options = {}) {
 			return { getSnapshot: () => project(), subscribe: () => () => {} };
 		}
 		shell() {
-			return { available: true, writable: true, dirty: false, invalid: false, saving: false, failed: false };
+			return { available: true, writable: this.writable, dirty: this.dirty, invalid: this.invalid, saving: this.saving, failed: this.failed };
 		}
 		field(name) {
 			const spec = this.specs.find((entry) => entry.field === name);
@@ -976,7 +985,35 @@ async function loadClientBundle(options = {}) {
 			return { text: spec.format(read(name)), overridden: false, invalid: false };
 		}
 		actions() {
-			return { edit: () => {}, resetField: () => {}, save: () => {}, discard: () => {} };
+			return {
+				edit: () => {
+					this.dirty = true;
+				},
+				resetField: () => {
+					this.dirty = true;
+				},
+				save: () => this.save(),
+				discard: () => {
+					this.discardCalls += 1;
+					this.dirty = false;
+					this.failed = false;
+				},
+			};
+		}
+		async save() {
+			this.saveCalls += 1;
+			if (this.saving) return; // 与官方一致：保存中再调会被直接挡掉
+			this.saving = true;
+			const delay = options.saveDelayMs ?? 0;
+			if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+			this.saving = false;
+			if (this.failuresLeft > 0) {
+				this.failuresLeft -= 1;
+				this.failed = true; // 失败时保留草稿（dirty 仍为 true）
+				return;
+			}
+			this.dirty = false;
+			this.failed = false;
 		}
 		dispose() {}
 	}
@@ -1270,6 +1307,176 @@ function findAll(node, predicate) {
 	const element = captured.registrations[0].render({ view: 'page', t: (key) => key, ...face, useReviewConfigForm: (selector) => selector(view), useReviewCatalog: (selector) => selector(face.hooks.reviewCatalog.getSnapshot()) });
 	check('J 目录失败时提示可见', findAll(element, (node) => node.props?.children === 'catalogFailed').length === 1);
 	check('J 目录失败时仍渲染表单', element?.type !== undefined && findAll(element, (node) => node.type === 'Input').length > 0);
+}
+
+/* ────────────────────────────── J2. 自动保存 ────────────────────────────── */
+
+console.log('\nJ2. 自动保存');
+
+{
+	// 编辑后防抖落盘；状态从 pending → saving → saved。
+	const { mod, ctx, captured } = await loadClientBundle({ saveFailures: 0 });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5; // 测试里不必等 500ms
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	check('J2 初始状态是 idle', face.hooks.reviewAutosave.getSnapshot().status === 'idle', face.hooks.reviewAutosave.getSnapshot().status);
+	face.edit('language', 'en');
+	check('J2 编辑后进入 pending', face.hooks.reviewAutosave.getSnapshot().status === 'pending', face.hooks.reviewAutosave.getSnapshot().status);
+	check('J2 防抖期间还没写', model.saveCalls === 0, String(model.saveCalls));
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 防抖结束后写了一次', model.saveCalls === 1, String(model.saveCalls));
+	check('J2 写完状态是 saved', face.hooks.reviewAutosave.getSnapshot().status === 'saved' && model.dirty === false, face.hooks.reviewAutosave.getSnapshot().status);
+	I.AUTO.delayMs = 500; // 复原
+}
+
+{
+	// 连续编辑只写一次（防抖），落盘用的是最后一次编辑。
+	const { mod, ctx, captured } = await loadClientBundle({});
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'e');
+	face.edit('language', 'en');
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 连续编辑只写一次', model.saveCalls === 1, String(model.saveCalls));
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 取值不合法时不写盘，状态为 blocked（避免把半截数值写下去）。
+	const { mod, ctx, captured } = await loadClientBundle({});
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	model.dirty = true;
+	model.invalid = true;
+	face.edit('waitMs', '1');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 非法值不写盘', model.saveCalls === 0, String(model.saveCalls));
+	check('J2 非法值状态为 blocked', face.hooks.reviewAutosave.getSnapshot().status === 'blocked', face.hooks.reviewAutosave.getSnapshot().status);
+	// 修正后自动补写
+	model.invalid = false;
+	face.edit('waitMs', '1000');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 修正后自动补写', model.saveCalls === 1 && face.hooks.reviewAutosave.getSnapshot().status === 'saved', `${model.saveCalls}/${face.hooks.reviewAutosave.getSnapshot().status}`);
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 冲突（第一次被拒）后要能恢复：丢掉草稿清掉过期 revision、重新暂存、再写一次成功。
+	const { mod, ctx, captured } = await loadClientBundle({ saveFailures: 1 });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 冲突后重试了一次', model.saveCalls === 2, String(model.saveCalls));
+	check('J2 冲突恢复靠「丢弃 + 重新暂存」', model.discardCalls === 1, String(model.discardCalls));
+	check('J2 恢复后状态回到 saved', face.hooks.reviewAutosave.getSnapshot().status === 'saved', face.hooks.reviewAutosave.getSnapshot().status);
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 一直失败就如实报 failed，不无限重试。
+	const { mod, ctx, captured } = await loadClientBundle({ saveFailures: 99 });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 持续失败只重试一次', model.saveCalls === 2, String(model.saveCalls));
+	check('J2 持续失败如实报 failed', face.hooks.reviewAutosave.getSnapshot().status === 'failed', face.hooks.reviewAutosave.getSnapshot().status);
+	// 手动「立即保存」仍可再试
+	face.save();
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	check('J2 立即保存可手动重试', model.saveCalls >= 3, String(model.saveCalls));
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 离开页面（SettingsForm 会调 onDiscard）前先把待写的改动落盘，最后几个字不能丢。
+	const { mod, ctx, captured } = await loadClientBundle({});
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5000; // 故意让防抖不会自己触发
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	check('J2 待写时还未落盘', model.saveCalls === 0);
+	face.discard();
+	check('J2 离开页面前先落盘', model.saveCalls === 1, String(model.saveCalls));
+	check('J2 之后才丢弃草稿', model.discardCalls === 1 && model.dirty === false);
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 只读部署：不写、也不假装保存。
+	const { mod, ctx, captured } = await loadClientBundle({ writable: false });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	model.dirty = true;
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 只读部署不写盘', model.saveCalls === 0, String(model.saveCalls));
+	check('J2 只读部署状态为 idle', face.hooks.reviewAutosave.getSnapshot().status === 'idle', face.hooks.reviewAutosave.getSnapshot().status);
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 保存期间又编辑：那几个字不能被漏掉（官方模型在 saving 时会直接挡掉第二次 save）。
+	const { mod, ctx, captured } = await loadClientBundle({ saveDelayMs: 40 });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 15)); // 第一次写入已在途中
+	face.edit('language', 'en-US'); // 落在保存期间
+	await new Promise((resolve) => setTimeout(resolve, 120));
+	check('J2 保存期间的编辑会再写一轮', model.saveCalls >= 2, String(model.saveCalls));
+	check('J2 最终状态是 saved（没有挂着的草稿）', face.hooks.reviewAutosave.getSnapshot().status === 'saved' && model.dirty === false, `${face.hooks.reviewAutosave.getSnapshot().status}/${model.dirty}`);
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 状态行渲染出来，并且读的是自动保存 store。
+	const { mod, ctx, captured } = await loadClientBundle({});
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	const view = { shell: model.shell(), fields: Object.fromEntries(model.specs.map((entry) => [entry.field, model.field(entry.field)])) };
+	const element = captured.registrations[0].render({
+		view: 'page',
+		t: (key) => key,
+		...face,
+		useReviewConfigForm: (selector) => selector(view),
+		useReviewCatalog: (selector) => selector({ status: 'ready', groups: [] }),
+		useReviewAutosave: (selector) => selector({ status: 'pending' }),
+	});
+	const status = findAll(element, (node) => node.props?.className === 'dsh-review-autosave');
+	check('J2 状态行渲染在页面上', status.length === 1, String(status.length));
+	// 放在表单最前面：打开页面就能看到，不用滚到最底下的保存按钮那里
+	const formChildren = findAll(element, (node) => node.type === 'SettingsForm')[0].props.children;
+	check('J2 状态行在表单最前面', findAll(formChildren[0], (node) => node.props?.className === 'dsh-review-autosave').length === 1, String(formChildren.length));
+	check('J2 状态行带状态与文案', status[0].props['data-state'] === 'pending' && findAll(status[0], (node) => node.props?.children === 'autoPending').length === 1);
+	// 保存按钮变成「立即保存」兜底
+	const labels = findAll(element, (node) => node.type === 'SettingsForm')[0].props.labels;
+	check('J2 保存按钮改成「立即保存」', labels.save === 'saveNow', labels.save);
 }
 
 /* ────────────────────────────── K. GUI 配置的宿主半边 ────────────────────────────── */

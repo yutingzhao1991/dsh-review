@@ -34,6 +34,9 @@ window.__ModuleLoader__.load({
 		/** 这个 bundle 的包名：`plugins.bundle.config` / `plugins.row.config` 的 key 用它拼。 */
 		const PKG = 'dsh-review';
 
+		/** 自动保存的防抖时长（测试可改小，避免等 500ms）。 */
+		const AUTO = { delayMs: 500 };
+
 		const KINDS = ['cli', 'llm', 'subagent'];
 		const CLI_PRESETS = ['codex', 'claude', 'gemini', 'opencode', 'cursor', 'custom'];
 		const STRENGTHS = ['light', 'standard', 'deep'];
@@ -136,6 +139,13 @@ window.__ModuleLoader__.load({
 			discoverInDefaultHint: '关闭时它们只是「可用」，要显式指名才会用到。',
 			discoverAdHoc: '允许按需指名 provider/model',
 			discoverAdHocHint: '打开时工具参数可以直接写 bailian/kimi-k3 这类不在配置里的模型。',
+			autoIdle: '改动会自动保存',
+			autoPending: '有改动待保存…',
+			autoSaving: '正在保存…',
+			autoSaved: '已自动保存',
+			autoFailed: '保存失败（配置可能被别处改过），已重试一次；也可以点「立即保存」再试',
+			autoBlocked: '有取值不合法，修正后会自动保存',
+			saveNow: '立即保存',
 			showJson: '显示原始 JSON',
 			hideJson: '收起原始 JSON',
 			jsonHint: '直接编辑存储值；保存时会校验（评审者必须是数组且每行有 id，模式必须是对象）。',
@@ -150,7 +160,7 @@ window.__ModuleLoader__.load({
 			unavailable: '该插件当前未加载，暂时无法配置。',
 			save: '保存',
 			saving: '保存中…',
-			saveFailed: '本部署没有接受这些值，已保留供你修改。',
+			saveFailed: '本部署没有接受这些值，已保留你的修改。',
 		};
 
 		const en = {
@@ -245,6 +255,13 @@ window.__ModuleLoader__.load({
 			discoverInDefaultHint: 'When off they stay available but are only used when named.',
 			discoverAdHoc: 'Allow naming provider/model ad hoc',
 			discoverAdHocHint: 'Lets a tool call name a model that is not in the config, e.g. bailian/kimi-k3.',
+			autoIdle: 'Changes are saved automatically',
+			autoPending: 'Unsaved changes…',
+			autoSaving: 'Saving…',
+			autoSaved: 'Saved automatically',
+			autoFailed: 'Save failed (the config may have changed elsewhere); retried once — “Save now” tries again',
+			autoBlocked: 'A value is invalid; it will save once corrected',
+			saveNow: 'Save now',
 			showJson: 'Show raw JSON',
 			hideJson: 'Hide raw JSON',
 			jsonHint: 'Edits the stored value directly; saving validates it (reviewers must be an array of objects with ids, modes an object).',
@@ -259,7 +276,7 @@ window.__ModuleLoader__.load({
 			unavailable: 'This plugin is not loaded right now, so it cannot be configured.',
 			save: 'Save',
 			saving: 'Saving…',
-			saveFailed: 'This deployment did not accept these values; they were kept for you to fix.',
+			saveFailed: 'This deployment did not accept these values; your edits were kept.',
 		};
 
 		/* ────────────────────────── 纯逻辑（自测直接覆盖） ────────────────────────── */
@@ -588,9 +605,30 @@ window.__ModuleLoader__.load({
 				unavailable: t('unavailable'),
 				readOnly: t('readOnly'),
 				saveFailed: t('saveFailed'),
-				save: t('save'),
+				// 自动保存之后，这个按钮是「立刻落盘 / 重试」的兜底入口。
+				save: t('saveNow'),
 				saving: t('saving'),
 			};
+		}
+
+		/** 自动保存状态行：贴在保存按钮上方，让人知道改动已经写下去了。 */
+		function AutoSaveStatus(props) {
+			const t = props.t;
+			const status = props.status ?? 'idle';
+			const text = {
+				idle: t('autoIdle'),
+				pending: t('autoPending'),
+				saving: t('autoSaving'),
+				saved: t('autoSaved'),
+				failed: t('autoFailed'),
+				blocked: t('autoBlocked'),
+			}[status] ?? t('autoIdle');
+			return h(
+				'p',
+				{ className: 'dsh-review-autosave', 'data-state': status, role: 'status' },
+				h('span', { className: 'dsh-review-autosave-dot', 'aria-hidden': 'true' }),
+				h('span', null, text),
+			);
 		}
 
 		/* ────────────────────────── 通用控件 ────────────────────────── */
@@ -1397,6 +1435,35 @@ h5.dsh-review-subgroup-title {
   font-size: 12px;
 }
 .dsh-review-textarea:disabled { color: var(--dsw-alias-label-tertiary, inherit); }
+
+/* 自动保存状态行：紧挨着保存按钮，用一个小圆点表示状态 */
+.dsh-review-autosave {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-review-autosave-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.45;
+}
+.dsh-review-autosave[data-state='saved'] .dsh-review-autosave-dot { opacity: 1; }
+.dsh-review-autosave[data-state='saving'] .dsh-review-autosave-dot,
+.dsh-review-autosave[data-state='pending'] .dsh-review-autosave-dot {
+  background: var(--dsw-alias-state-business-primary, #4d6bfe);
+  opacity: 1;
+}
+.dsh-review-autosave[data-state='failed'],
+.dsh-review-autosave[data-state='blocked'] { color: var(--dsw-alias-state-error-primary, #d93026); }
+.dsh-review-autosave[data-state='failed'] .dsh-review-autosave-dot,
+.dsh-review-autosave[data-state='blocked'] .dsh-review-autosave-dot { opacity: 1; }
 `.trim();
 
 		/** 注入一次样式；已注入过（HMR/重挂载）就不再重复插标签。 */
@@ -1486,6 +1553,7 @@ h5.dsh-review-subgroup-title {
 			const [advancedOpen, setAdvancedOpen] = useState(false);
 			const view = props.useReviewConfigForm((snapshot) => snapshot);
 			const catalog = typeof props.useReviewCatalog === 'function' ? props.useReviewCatalog((snapshot) => snapshot) : props.catalog;
+			const autosave = typeof props.useReviewAutosave === 'function' ? props.useReviewAutosave((snapshot) => snapshot) : props.autosave;
 			if (props.view === 'summary') return t('summary');
 			const actions = { edit: props.edit, resetField: props.resetField, save: props.save, discard: props.discard };
 			const disabled = !view.shell.writable || view.shell.saving;
@@ -1511,6 +1579,9 @@ h5.dsh-review-subgroup-title {
 			return h(
 				P.SettingsForm,
 				{ labels: formLabels(t), state: view.shell, onSave: props.save, onDiscard: props.discard },
+				// 自动保存状态放在最上面：打开页面就知道这一页会自动保存，
+				// 不必滚到最底下才发现有个保存按钮。
+				h(AutoSaveStatus, { key: 'autosave', t, status: autosave?.status }),
 				catalog?.status === 'loading' ? h('p', { className: 'dsh-review-hint' }, t('catalogLoading')) : null,
 				catalog?.status === 'error' ? h('p', { className: 'dsh-review-hint' }, t('catalogFailed')) : null,
 				// 1) 用户最关心的：启用哪些评审者（最上面）
@@ -1578,7 +1649,94 @@ h5.dsh-review-subgroup-title {
 				fields: Object.fromEntries(FIELDS.map((field) => [field.path, model.field(field.path)])),
 			}));
 			ctx.effect(() => () => model.dispose(), 'dsh-review: form subscription');
-			const actions = model.actions();
+			const modelActions = model.actions();
+
+			/**
+			 * 自动保存。
+			 *
+			 * 官方 `SettingsFormModel` 是刻意做成「暂存 + 点保存」的，但那个保存按钮在页面最下面，
+			 * 很容易被忘掉。这里在它之上加一层防抖自动保存：每次编辑后 `delayMs` 毫秒内没有新编辑
+			 * 就落盘。安全性由宿主侧保证——写入会校验整份配置、失败就拒绝，所以半途的取值写不坏配置。
+			 *
+			 * 唯一需要特殊处理的是**冲突**：官方模型在首次暂存时记下 revision（`baseline ??=`），
+			 * 写入被拒后它不会刷新，于是后续保存会一直用过期 revision 被拒。所以失败时我们丢掉草稿
+			 * （这会清掉 baseline）再把同样的文本重新暂存一遍，从而拿到新 revision 重试一次。
+			 */
+			const auto = { delayMs: AUTO.delayMs, timer: undefined, retried: false, snapshot: { status: 'idle' } };
+			const autoListeners = new Set();
+			const publishAuto = (status) => {
+				auto.snapshot = { status };
+				for (const listener of [...autoListeners]) {
+					try {
+						listener();
+					} catch {
+						/* 一个订阅者出错不影响保存 */
+					}
+				}
+			};
+			const autoStore = {
+				getSnapshot: () => auto.snapshot,
+				subscribe: (listener) => {
+					autoListeners.add(listener);
+					return () => autoListeners.delete(listener);
+				},
+			};
+			const clearAutoTimer = () => {
+				if (auto.timer === undefined) return;
+				clearTimeout(auto.timer);
+				auto.timer = undefined;
+			};
+			const draftTexts = () => FIELDS.map((field) => ({ field: field.path, text: model.field(field.path)?.text ?? '' }));
+			const writeNow = async () => {
+				clearAutoTimer();
+				const shell = model.shell();
+				if (!shell.writable) return publishAuto('idle');
+				if (shell.invalid) return publishAuto('blocked');
+				if (!shell.dirty) return publishAuto('saved');
+				publishAuto('saving');
+				await model.save();
+				if (model.shell().failed && !auto.retried) {
+					auto.retried = true;
+					const drafts = draftTexts();
+					modelActions.discard();
+					for (const draft of drafts) modelActions.edit(draft.field, draft.text);
+					await model.save();
+				}
+				auto.retried = false;
+				const after = model.shell();
+				// 保存期间又落了编辑（或这次 save 被模型的 `saving` 挡掉了）时还要再写一轮，
+				// 否则那几个字会一直挂在草稿里没人管。
+				if (after.failed) publishAuto('failed');
+				else if (after.invalid) publishAuto('blocked');
+				else if (after.dirty) scheduleAutoSave();
+				else publishAuto('saved');
+			};
+			const scheduleAutoSave = () => {
+				clearAutoTimer();
+				publishAuto('pending');
+				auto.timer = setTimeout(() => {
+					auto.timer = undefined;
+					void writeNow();
+				}, auto.delayMs);
+				auto.timer?.unref?.();
+			};
+			// 保存前先落盘：离开页面时 SettingsForm 会调 onDiscard，不能把最后几个字丢掉。
+			// `model.save()` 在第一个 await 之前就把 ops 算好了，所以紧接着 discard 是安全的。
+			const actions = {
+				edit: (field, text) => {
+					modelActions.edit(field, text);
+					scheduleAutoSave();
+				},
+				resetField: (field) => {
+					modelActions.resetField(field);
+					scheduleAutoSave();
+				},
+				save: () => void writeNow(),
+				discard: () => {
+					void writeNow();
+					modelActions.discard();
+				},
+			};
 
 			// 宿主模型目录（provider / model 下拉的数据源）：可选能力，拿不到就退回手填。
 			const catalog = { status: 'idle', groups: [], failures: [] };
@@ -1654,7 +1812,7 @@ h5.dsh-review-subgroup-title {
 						name,
 						key,
 						locale: NS,
-						inject: () => ({ hooks: { reviewConfigForm: store, reviewCatalog: catalogStore }, catalog, ...actions }),
+						inject: () => ({ hooks: { reviewConfigForm: store, reviewCatalog: catalogStore, reviewAutosave: autoStore }, catalog, ...actions }),
 					},
 					ReviewConfigPage,
 				);
@@ -1691,6 +1849,7 @@ h5.dsh-review-subgroup-title {
 			effectiveDiscoverEnabled,
 			STYLES,
 			injectStyles,
+			AUTO,
 			reviewerTarget,
 			reviewerTargetFull,
 			reviewerChoices,
