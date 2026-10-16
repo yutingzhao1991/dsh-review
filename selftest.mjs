@@ -148,11 +148,24 @@ function makeHarness(options = {}) {
 	return { ctx, state, cwd };
 }
 
+/**
+ * 加载插件。
+ *
+ * 「一个都不选 = 不启用」生效之后，绝大多数用例（验证 argv、编排、spec……）不该被迫每次都写
+ * `defaultReviewers`，所以这里替它们把配置里定义的评审者都选上——用真实归一化代码推导 id。
+ * 想验证选择规则的用例显式传 `defaultReviewers`（包括 `[]`）即可跳过这层。
+ */
 async function loadPlugin({ plugin, harness = {}, services } = {}) {
+	const config = plugin === undefined ? {} : { ...plugin };
+	if (!('defaultReviewers' in config) && (config.agents !== undefined || config.models !== undefined || config.reviewers !== undefined)) {
+		const { resolveSettings } = await import(new URL('./lib/settings.js', import.meta.url).href);
+		const ids = resolveSettings(config).reviewers.filter((reviewer) => reviewer.enabled).map((reviewer) => reviewer.id);
+		if (ids.length > 0) config.defaultReviewers = ids;
+	}
 	const built = makeHarness({ ...harness, services: services ?? harness.services });
 	const mod = await import(PLUGIN);
-	mod.apply(built.ctx, plugin ?? {});
-	return { ...built, definition: built.state.tool, mod };
+	mod.apply(built.ctx, config);
+	return { ...built, definition: built.state.tool, mod, config };
 }
 
 /** 跑一次工具并等它结算（默认 harness 会等 job 跑完）。 */
@@ -238,6 +251,16 @@ console.log('\nA. 配置归一化');
 	check('A 调用方指定评审者最高优先', selectReviewers(settings, settings.modes.quick, ['codex']).map((r) => r.id).join(',') === 'codex');
 	await rejects('A 未知模式报错', () => resolveMode(settings, 'nope'));
 	await rejects('A 未知评审者报错', () => selectReviewers(settings, undefined, ['ghost']));
+
+	// 超时默认不设：评审跑多久由调用方决定，插件不替它掐表。
+	check('A 硬超时默认不限制', resolveSettings({}).hardTimeoutMs === 0);
+	check('A 前台等待仍有默认值', resolveSettings({}).waitMs === 120000);
+	// 一个都不选 = 不启用：unset 与 [] 都不是「全部启用」。
+	check('A 未勾选时默认集合为空', resolveSettings({ agents: [{ preset: 'codex' }] }).defaultReviewers.length === 0);
+	{
+		const empty = resolveSettings({ agents: [{ preset: 'codex' }] });
+		await rejects('A 未勾选任何评审者时报错', () => selectReviewers(empty, undefined, undefined));
+	}
 
 	const bad = resolveSettings({ reviewers: [{ id: 'x', kind: 'llm' }, { kind: 'cli' }, { id: 'y', kind: 'nope' }] });
 	check('A 非法评审者被丢弃', bad.reviewers.length === 0 && bad.warnings.length === 3, `${bad.reviewers.length}/${bad.warnings.length}`);
@@ -617,7 +640,16 @@ console.log('\nG. 边界');
 	check('G 只跑默认评审者', value.reviewers.join(',') === 'codex', value.reviewers.join(','));
 	const both = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }, { preset: 'claude' }] }, harness: { ...GIT, report: '结论', stdout: '结论' } });
 	const value2 = await run(both, {});
-	check('G 不传则跑全部启用', value2.reviewers.join(',') === 'codex,claude', value2.reviewers.join(','));
+	check('G 不传则用配置里勾选的评审者', value2.reviewers.join(',') === 'codex,claude', value2.reviewers.join(','));
+	// 一个都不勾 = 不启用：报错要能指导用户去勾选或显式传参。
+	const none = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }, { preset: 'claude' }], defaultReviewers: [] }, harness: { ...GIT, report: '结论' } });
+	const error = await rejects('G 一个都不勾时报错', () => run(none, {}));
+	check('G 空集合报错可指导操作', error?.message.includes('defaultReviewers') && error?.message.includes('reviewers 参数'), error?.message);
+	check('G 空集合不会偷偷跑评审者', !none.state.spawns.some((spec) => spec.argv[0] === '/fake/codex'));
+	// 勾了一个就只跑那一个
+	const one = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }, { preset: 'claude' }], defaultReviewers: ['claude'] }, harness: { ...GIT, stdout: '结论' } });
+	const valueOne = await run(one, {});
+	check('G 勾选决定默认集合', valueOne.reviewers.join(',') === 'claude', valueOne.reviewers.join(','));
 }
 
 /* ────────────────────────────── H. 回归（真实评审发现的问题） ────────────────────────────── */
@@ -845,10 +877,13 @@ async function reviewWith(plugin, args, catalog) {
 }
 {
 	// discover.inDefault：进入默认集合。
-	const { llm } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'], include: ['glm*'], inDefault: true } }, {});
+	const { llm } = await reviewWith({ discover: { providers: ['bailian'], include: ['glm*'], inDefault: true } }, {});
 	check('I inDefault 时自动展开者进默认集合', llm.calls.length === 1 && llm.calls[0].model === 'glm-5.3', JSON.stringify(llm.calls.map((c) => c.model)));
-	const { llm: llm2 } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'], include: ['glm*'] } }, {});
-	check('I 未开 inDefault 时不进默认集合', llm2.calls.length === 0, JSON.stringify(llm2.calls.map((c) => c.model)));
+	// 只有 discover、没开 inDefault、也没勾任何评审者：默认集合是空的 → 直接报错（不是把能用的都跑一遍）。
+	await rejects('I 未开 inDefault 且没勾选时报错', () => reviewWith({ discover: { providers: ['bailian'], include: ['glm*'] } }, {}));
+	// 显式传 reviewers 仍然照跑。
+	const explicit = await reviewWith({ discover: { providers: ['bailian'], include: ['glm*'] } }, { reviewers: ['bailian/glm-5.3'] });
+	check('I 未勾选但显式指名可用', explicit.llm.calls.length === 1 && explicit.llm.calls[0].model === 'glm-5.3', JSON.stringify(explicit.llm.calls.map((c) => c.model)));
 }
 {
 	// adHoc 关掉后，未配置的模型不可用；defaultReviewers 也在加载时被过滤。
@@ -859,8 +894,8 @@ async function reviewWith(plugin, args, catalog) {
 }
 {
 	// 没有静态评审者也能用：discover 单独撑起整个工具。
-	const { llm, value } = await reviewWith({ discover: { providers: ['bailian'], include: ['qwen*'] } }, {});
-	check('I 没有静态配置也能评审', llm.calls.length === 1 && llm.calls[0].model === 'qwen3.8-max', JSON.stringify(llm.calls.map((c) => c.model)));
+	const { llm, value } = await reviewWith({ discover: { providers: ['bailian'], include: ['qwen*'], inDefault: true } }, {});
+	check('I 只配 discover + inDefault 也能评审', llm.calls.length === 1 && llm.calls[0].model === 'qwen3.8-max', JSON.stringify(llm.calls.map((c) => c.model)));
 	check('I 报告头列出发现的评审者', value.reviewers.join(',') === 'bailian/qwen3.8-max', JSON.stringify(value.reviewers));
 }
 {
@@ -881,7 +916,8 @@ async function reviewWith(plugin, args, catalog) {
 			yield { type: 'finish', reason: { kind: 'stop' } };
 		},
 	};
-	const h = await loadPlugin({ plugin: { discover: true }, harness: { ...GIT, services: { llm } } });
+	// discover: true 展开全部 provider，inDefault 让它们进默认集合（否则「一个都不选」= 不启用）。
+	const h = await loadPlugin({ plugin: { discover: { enabled: true, inDefault: true } }, harness: { ...GIT, services: { llm } } });
 	const value = await run(h, {});
 	check('I 一个 provider 报错不影响其他', value.report.includes('结论') && value.report.includes('模型列表获取失败，已跳过'), value.report.slice(-600));
 }
@@ -915,7 +951,8 @@ async function loadClientBundle(options = {}) {
 			if (kids.length > 0) merged.children = kids.length === 1 ? kids[0] : kids;
 			return { type, props: merged, children: kids };
 		},
-		useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+		// forceInitial 让用例可以「点开」默认收起的分区（桩件没有真正的 state 更新）。
+		useState: (initial) => [options.forceInitial === undefined ? (typeof initial === 'function' ? initial() : initial) : options.forceInitial, () => {}],
 		useId: () => 'id',
 	};
 	class SettingsFormModel {
@@ -1082,7 +1119,12 @@ function findAll(node, predicate) {
 	const paths = I.FIELDS.map((field) => field.path);
 	check('J 字段数量', I.FIELDS.length === 20, String(I.FIELDS.length));
 	check('J 字段路径唯一', new Set(paths).size === paths.length);
-	check('J 每个字段都有分组', I.FIELDS.every((field) => I.GROUPS.some((group) => group.key === field.group)), JSON.stringify(I.FIELDS.filter((f) => !I.GROUPS.some((g) => g.key === f.group)).map((f) => f.path)));
+	// 结构：defaultReviewers 归顶部列表，reviewers 常显，其余都在 advanced 的子分组里
+	const bySection = (section) => I.FIELDS.filter((field) => field.section === section).map((field) => field.path).sort().join(',');
+	check('J 顶部列表只管 defaultReviewers', bySection('active') === 'defaultReviewers', bySection('active'));
+	check('J 评审者定义常显', bySection('reviewers') === 'reviewers', bySection('reviewers'));
+	check('J 其余字段都在高级配置里', I.FIELDS.filter((field) => field.section === 'advanced').length === 18, String(I.FIELDS.filter((field) => field.section === 'advanced').length));
+	check('J 高级子分组都非空', I.ADVANCED_GROUPS.every((group) => I.FIELDS.some((field) => field.section === 'advanced' && field.group === group.key)), JSON.stringify(I.ADVANCED_GROUPS));
 	const switchFields = I.FIELDS.filter((field) => field.control === 'switch').length;
 	const textFields = I.FIELDS.filter((field) => field.control === 'text' || field.control === 'number').length;
 	check('J 布尔字段用 Switch', switchFields === 4, String(switchFields));
@@ -1117,7 +1159,7 @@ function findAll(node, predicate) {
 	const catalogSnapshot = face.hooks.reviewCatalog.getSnapshot();
 	check('J 目录加载成功并带 provider', catalogSnapshot.status === 'ready' && catalogSnapshot.groups.length === 2, JSON.stringify({ status: catalogSnapshot.status, groups: catalogSnapshot.groups.length }));
 
-	// ── 渲染树 ──
+	// ── 渲染树（默认：高级配置收起）──
 	const page = captured.registrations[0].render;
 	const view = {
 		shell: model.shell(),
@@ -1128,28 +1170,51 @@ function findAll(node, predicate) {
 	const element = page(renderProps);
 	check('J 页面用 SettingsForm 包住控件', element?.type === bundlePrimitives.SettingsForm, String(typeof element?.type));
 	check('J 表单带 save/discard', typeof element.props.onSave === 'function' && typeof element.props.onDiscard === 'function');
-	const groupsRendered = element.children.filter((child) => child?.type === 'section');
-	check('J 分成四组渲染', groupsRendered.length === 4, String(groupsRendered.length));
+	const basicSections = findAll(element, (node) => node.type === 'section' && (node.props['data-section'] === 'active' || node.props['data-section'] === 'reviewers'));
+	check('J 常显分区顺序：先启用列表，再评审者定义', basicSections.map((node) => node.props['data-section']).join(',') === 'active,reviewers', JSON.stringify(basicSections.map((node) => node.props['data-section'])));
+	const advancedHeader = findAll(element, (node) => node.type === 'button' && node.props.id === 'dsh-review-advanced');
+	check('J 高级配置有折叠开关', advancedHeader.length === 1 && advancedHeader[0].props['aria-expanded'] === false, JSON.stringify(advancedHeader.map((node) => node.props['aria-expanded'])));
+	// 收起时：只有「启用列表」的开关 + 每行评审者的启用开关
+	check('J 收起时只有启用列表与行内开关', findAll(element, (node) => node.type === 'Switch').length === 2 + 2, String(findAll(element, (node) => node.type === 'Switch').length));
+	check('J 收起时不渲染高级字段', findAll(element, (node) => node.type === 'SegmentedControl').length === 2, String(findAll(element, (node) => node.type === 'SegmentedControl').length));
+	check('J 收起时没有预算输入框', findAll(element, (node) => node.type === 'SettingsValueField').length === 0, String(findAll(element, (node) => node.type === 'SettingsValueField').length));
+	check('J 收起时没有模式编辑器', findAll(element, (node) => node.type === 'Button').every((node) => node.props.children !== 'addMode'));
+	// 顶部列表：2 个定义（codex / qwen），都被 defaultReviewers 勾上，并显示指向什么
+	const activeList = findAll(element, (node) => node.props?.className === 'dsh-review-active-item');
+	check('J 顶部列出全部启用的评审者', activeList.length === 2, String(activeList.length));
+	check('J 顶部列出 id 与指向', findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children).join(',') === 'codex,qwen', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children)));
+	check('J 顶部显示指向的模型/可执行', findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children).join(' | ') === 'cli · codex | llm · bailian/qwen3.8-max', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children)));
+	check('J 顶部开关反映勾选状态', findAll(element, (node) => node.props?.className === 'dsh-review-active-item').every((item) => findAll(item, (node) => node.type === 'Switch')[0]?.props.checked === true));
+	check('J 已勾选时不显示告警', findAll(element, (node) => node.props?.className === 'dsh-review-invalid').length === 0);
+	// 评审者定义区：行编辑器 + 增删都在
+	check('J 每行评审者有删除按钮', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length === 2, String(findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length));
+	check('J 有添加评审者按钮', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'addReviewer').length === 1);
+	check('J JSON 兜底默认收起', findAll(element, (node) => node.type === 'SettingsValueField').length === 0);
+}
+
+{
+	// 展开高级配置（桩件强制 useState 初值为 true）：所有高级字段都该出现。
+	const { mod, ctx, captured, primitives: bundlePrimitives, react } = await loadClientBundle({ forceInitial: true });
+	const I = mod.__internals;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const view = { shell: model.shell(), fields: Object.fromEntries(model.specs.map((entry) => [entry.field, model.field(entry.field)])) };
+	const element = captured.registrations[0].render({ view: 'page', t: (key) => key, ...face, useReviewConfigForm: (selector) => selector(view), useReviewCatalog: (selector) => selector(face.hooks.reviewCatalog.getSnapshot()) });
+	const textFields = I.FIELDS.filter((field) => field.control === 'text' || field.control === 'number').length;
+	// forceInitial 也把「显示原始 JSON」的折叠打开了，所以是 textFields + 2 个 JSON 兜底框。
+	check('J 展开后高级字段出现', findAll(element, (node) => node.type === 'SettingsValueField').length === textFields + 2, `${findAll(element, (node) => node.type === 'SettingsValueField').length} vs ${textFields + 2}`);
+	check('J 展开后有四个高级子分组', findAll(element, (node) => node.props?.className === 'dsh-review-subgroup').length === I.ADVANCED_GROUPS.length, String(findAll(element, (node) => node.props?.className === 'dsh-review-subgroup').length));
 	const switches = findAll(element, (node) => node.type === 'Switch');
-	// 字段 4 个开关 + 每个评审者行的启用开关 2 个 + 模式的合并开关 1 个
-	check('J 布尔字段渲染成 Switch', switches.length === switchFields + 2 + 1, String(switches.length));
-	// 测试数据 discover.providers = ['bailian']，所以「自动展开模型」那一格应显示为开。
+	// 4 个布尔字段 + 顶部列表 2 个 + 评审者行内 2 个 + 模式的合并开关 1 个
+	check('J 展开后开关数量（字段 4 + 顶部 2 + 行内 2 + 合并 1）', switches.length === 4 + 2 + 2 + 1, String(switches.length));
 	const discoverHolder = findAll(element, (node) => node.props?.className === 'dsh-review-field').find((node) => findAll(node, (child) => child.props?.children === 'discoverEnabled').length > 0);
-	const discoverSwitch = findAll(discoverHolder, (node) => node.type === 'Switch')[0];
-	check('J 推断生效的开关显示为开', discoverSwitch?.props?.checked === true, JSON.stringify(discoverSwitch?.props?.checked));
-	const segmented = findAll(element, (node) => node.type === 'SegmentedControl');
-	check('J 枚举与类型用 SegmentedControl', segmented.length >= 4, String(segmented.length));
-	const menus = findAll(element, (node) => node.type === 'Menu');
-	check('J 下拉（defaultMode / provider / model / when…）出现', menus.length >= 4, String(menus.length));
-	const inputs = findAll(element, (node) => node.type === 'Input');
-	check('J 结构化编辑器渲染出可编辑输入框', inputs.length >= 8, String(inputs.length));
-	const removeButtons = findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove');
-	check('J 每行都有删除按钮（2 个评审者 + 1 个模式）', removeButtons.length === 3, String(removeButtons.length));
-	const addButtons = findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'addReviewer' || node.props.children === 'addMode');
-	check('J 有「添加评审者」与「添加模式」', addButtons.length === 2, JSON.stringify(addButtons.map((node) => node.props.children)));
-	check('J 评审者行按行渲染', findAll(element, (node) => node.type === 'Input' && node.props.id === 'reviewer-0-id').length === 1);
-	check('J 单值字段用官方控件', findAll(element, (node) => node.type === 'SettingsValueField').length === textFields, `${findAll(element, (node) => node.type === 'SettingsValueField').length} vs ${textFields}`);
-	check('J JSON 兜底默认收起', findAll(element, (node) => node.type === 'SettingsValueField' && String(node.props.label).includes('showJson')).length === 0);
+	check('J 推断生效的开关显示为开', findAll(discoverHolder, (node) => node.type === 'Switch')[0]?.props?.checked === true, JSON.stringify(findAll(discoverHolder, (node) => node.type === 'Switch').map((n) => n.props.checked)));
+	check('J 展开后有「添加模式」', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'addMode').length === 1);
+	check('J 展开后下拉与分段控件齐备', findAll(element, (node) => node.type === 'Menu').length >= 4 && findAll(element, (node) => node.type === 'SegmentedControl').length >= 4, `${findAll(element, (node) => node.type === 'Menu').length}/${findAll(element, (node) => node.type === 'SegmentedControl').length}`);
+	void bundlePrimitives;
+	void react;
 }
 
 {
@@ -1243,6 +1308,7 @@ console.log('\nK. GUI 配置的宿主半边');
 		check('K 显式 enabled 优先', enabledOf({ discover: { enabled: true } }) === true);
 		// 表单打开时数值/开关字段应该有真实值可显示
 		check('K 数值与开关默认值可显示', meta(['waitMs']).default === 120000 && meta(['discover', 'adHoc']).default === true && meta(['language']).default === 'auto');
+		check('K 硬超时默认 0（不限制）', meta(['hardTimeoutMs']).default === 0);
 	}
 }
 

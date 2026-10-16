@@ -309,12 +309,17 @@ You do not have to hand-edit YAML. Open **Plugins** in the Web sidebar, pick **d
 and open its row (or the bundle card): that page renders a form for this plugin's config, and
 it prefers selection over typing.
 
-| Group | Controls |
+The page is ordered by what you reach for first:
+
+| Section | Contents |
 | --- | --- |
-| Review behaviour | language as a segmented control, mandatory-review injection as a switch, default mode as a **dropdown of the modes you defined**, default reviewers as a **multi-select of the reviewers you defined** |
-| Reviewers and modes | structured editors: add/remove rows, pick `kind` from a segmented control, and pick **provider / model from the live host catalog** — no model names to type |
-| Model discovery | switches, a **provider multi-select fed by the host catalog**, glob allow/deny lists, label template |
-| Budgets and timeouts | numbers pre-filled with the values actually in effect |
+| **Enabled reviewers** (top) | one row per defined reviewer: a switch, its id, and what it points at (`cli · codex`, `llm · bailian/qwen3.8-max`). Checking a row is how that reviewer gets used by default, and the list is drawn only from the definitions below. |
+| **Reviewer definitions** | structured editor: add/remove rows, pick `kind` from a segmented control, and pick **provider / model from the live host catalog** — no model names to type |
+| **Advanced settings** (collapsed by default) | review behaviour (language, policy injection, default mode), review modes, model discovery (switches, a provider multi-select fed by the host catalog, glob lists, label template), and budgets/timeouts pre-filled with the values actually in effect |
+
+**Nothing checked means no reviewers are enabled.** A bare `review()` call then fails with a
+message telling you to check something or pass `reviewers` explicitly — an empty selection is
+never read as “use everything”.
 
 Things worth knowing:
 
@@ -398,13 +403,13 @@ Every key is optional; defaults live in `lib/settings.js`.
 | `models` | `[]` | shorthand list of `llm` reviewers; `id` defaults to the model name |
 | `reviewers` | `[]` | full reviewer definitions (see below); wins over a shorthand with the same id; GUI-editable as JSON |
 | `discover` | `{ enabled: false, adHoc: true, … }` | pull models straight from DSH's provider config instead of re-declaring them (see [Model discovery](#model-discovery)); editable in the GUI |
-| `defaultReviewers` | all enabled | reviewer ids used when the tool call does not pass `reviewers`; editable in the GUI |
+| `defaultReviewers` | **none** | reviewer ids used when a tool call omits `reviewers`. Empty means **no reviewers are enabled** and such a call fails loudly — it is never read as “all enabled”. Set it in the GUI's top list or in YAML |
 | `defaultMode` | none | mode applied when the tool call does not pass `mode`; editable in the GUI |
 | `modes` | `{}` | named review modes; GUI-editable as JSON |
 | `injectPolicy` | `false` | write each mode's `when` rule into the system prompt; editable in the GUI |
 | `language` | `auto` | `zh` / `en` / `auto` — output language (`auto` follows `instructions`, Chinese when there is none); editable in the GUI |
 | `waitMs` | `120000` | how long the tool blocks before handing back a job id; `0` = return immediately |
-| `hardTimeoutMs` | `3600000` | wall-clock ceiling for the whole review; `0` = unlimited |
+| `hardTimeoutMs` | **`0`** | fallback wall-clock ceiling; `0` = unlimited (the default) — how long a review may run is the caller's call (wait for the job, or `job_kill` it) |
 | `maxResultChars` | `80000` | cap on the report returned to the model; longer reports are head/tail truncated with a path to the full file |
 | `maxDiffChars` | `160000` | cap on the diff packet fed to `llm`/`subagent`/packet-based CLI reviewers |
 | `maxFileDiffChars` | `40000` | per-file diff cap |
@@ -491,8 +496,9 @@ used (`preset`/`executable`/`command` → `cli`, `provider` → `llm`, `subagent
 
 1. **Validate** — `base` / `commit` / `instructions` are mutually exclusive, ranges may not
    start with `-` (git would read them as flags), `reviewers` must be a string array.
-2. **Resolve** — mode → reviewer set (config entries, plus discovery and ad-hoc names when
-   enabled) → working directory (`exec.agent.session.header.cwd`).
+2. **Resolve** — tool call's `reviewers` → the mode's `reviewers` → `defaultReviewers`, plus
+   discovery and ad-hoc names when enabled. An empty outcome is an error, not “everything”.
+   Then the working directory (`exec.agent.session.header.cwd`).
 3. **Collect** — always: `git status --porcelain -z -uall` and `--numstat`. Only when a
    selected reviewer needs it: the full patch and the contents of untracked files, trimmed to
    the configured budget with an explicit note about what was omitted.
@@ -564,6 +570,7 @@ node selftest.mjs
 - `discover` expands whatever `listModels()` reports. A provider that reports hundreds of
   models will make the tool description and default set unwieldy; use `include`/`exclude`.
 - DSH has no generic nested-object control, so the GUI renders its own row editors for `reviewers` / `modes` and keeps a raw-JSON fallback instead of a schema-driven form.
+- Reviewers are opt-in: with nothing selected the tool refuses to run rather than falling back to every enabled reviewer.
 - `when` is a system-prompt statement of policy, not an enforcement gate.
 
 ## License

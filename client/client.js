@@ -41,13 +41,25 @@ window.__ModuleLoader__.load({
 		/* ────────────────────────── 字典 ────────────────────────── */
 
 		const zh = {
-			summary: '配置 review 工具的评审者、模式与预算。',
+			summary: '先勾选要用的评审者，再按需调整高级配置。',
+			groupActive: '启用的评审者',
+			groupReviewers: '评审者定义',
+			groupAdvanced: '高级配置',
+			advancedHint: '模式、模型发现、语言与预算。默认收起，需要时再展开。',
+			expandSection: '展开',
+			collapseSection: '收起',
+			activeHint: '只列出「评审者定义」里启用的那些。勾上的会被 review 工具默认使用；也可以在调用时用 reviewers 参数临时指定别的。',
+			activeEmpty: '还没有评审者定义，先到下面添加一个。',
+			activeNoneSelected: '一个都没勾 = 不启用任何评审者：这时调用 review 会直接报错，要求显式指定 reviewers。',
+			activeDisabledNote: '另有 {count} 个评审者被「启用」开关关掉了，不在这里列出。',
+			activeUnknownNote: '以下 id 在配置里被选中，但已不在评审者定义里（可能是改过 id）：',
+			activeTargetCli: 'CLI',
+			defaultReviewers: '启用的评审者',
+			defaultReviewersHint: '勾上的会被默认使用。',
 			groupBehavior: '评审行为',
-			groupReviewers: '评审者与模式',
+			groupModes: '评审模式',
 			groupDiscover: '模型发现',
 			groupBudget: '预算与超时',
-			defaultReviewers: '默认评审者',
-			defaultReviewersHint: '不传 reviewers 时用它们。一个都不勾 = 用全部启用的评审者。',
 			defaultMode: '默认评审模式',
 			defaultModeHint: '不传 mode 时套用的模式。',
 			language: '输出语言',
@@ -95,7 +107,7 @@ window.__ModuleLoader__.load({
 			waitMs: '前台等待时长（毫秒）',
 			waitMsHint: '超过它就把 job id 交回，由 job_output 收结论；0 = 不等待。',
 			hardTimeoutMs: '硬超时上限（毫秒）',
-			hardTimeoutMsHint: '整次评审的墙钟上限；0 = 不限制。',
+			hardTimeoutMsHint: '兜底墙钟上限；0 = 不限制（默认），什么时候终止由调用方自己判断。',
 			maxResultChars: '结论字符上限',
 			maxResultCharsHint: '回给模型的报告上限，超出按首尾截断并给出完整报告路径。',
 			maxDiffChars: 'diff 字符上限',
@@ -138,13 +150,25 @@ window.__ModuleLoader__.load({
 		};
 
 		const en = {
-			summary: 'Configure the review tool’s reviewers, modes, and budgets.',
+			summary: 'Pick the reviewers you want first, then adjust advanced settings as needed.',
+			groupActive: 'Enabled reviewers',
+			groupReviewers: 'Reviewer definitions',
+			groupAdvanced: 'Advanced settings',
+			advancedHint: 'Modes, model discovery, language, and budgets. Collapsed by default.',
+			expandSection: 'Expand',
+			collapseSection: 'Collapse',
+			activeHint: 'Only reviewers that are enabled below are listed. Checked ones are used by default; a call may still name others with its reviewers argument.',
+			activeEmpty: 'No reviewer definitions yet — add one below.',
+			activeNoneSelected: 'Nothing checked means no reviewers are enabled: calling review would fail and ask for explicit reviewers.',
+			activeDisabledNote: '{count} more reviewer(s) are turned off by their “enabled” switch and are not listed here.',
+			activeUnknownNote: 'These ids are selected in the config but no longer defined (an id may have changed):',
+			activeTargetCli: 'CLI',
+			defaultReviewers: 'Enabled reviewers',
+			defaultReviewersHint: 'Checked ones are used by default.',
 			groupBehavior: 'Review behaviour',
-			groupReviewers: 'Reviewers and modes',
+			groupModes: 'Review modes',
 			groupDiscover: 'Model discovery',
 			groupBudget: 'Budgets and timeouts',
-			defaultReviewers: 'Default reviewers',
-			defaultReviewersHint: 'Used when a call omits reviewers. Selecting none means every enabled reviewer.',
 			defaultMode: 'Default review mode',
 			defaultModeHint: 'Applied when a call omits mode.',
 			language: 'Output language',
@@ -192,7 +216,7 @@ window.__ModuleLoader__.load({
 			waitMs: 'Foreground wait (ms)',
 			waitMsHint: 'Past it the tool hands back a job id for job_output; 0 = do not wait.',
 			hardTimeoutMs: 'Hard timeout (ms)',
-			hardTimeoutMsHint: 'Wall-clock ceiling for the whole review; 0 = unlimited.',
+			hardTimeoutMsHint: 'Fallback wall-clock ceiling; 0 = unlimited (the default) — the caller decides when to stop it.',
 			maxResultChars: 'Report character cap',
 			maxResultCharsHint: 'Cap on the report returned to the model; longer reports are head/tail truncated with a path to the full file.',
 			maxDiffChars: 'Diff character cap',
@@ -315,6 +339,45 @@ window.__ModuleLoader__.load({
 			return splitList(providersText).length > 0 || splitList(includeText).length > 0;
 		}
 
+		/** 一行评审者「指向什么」的一句话摘要（顶部列表用）。 */
+		function reviewerTarget(row) {
+			const kind = row.kind ?? 'cli';
+			if (kind === 'llm') return `${row.provider ?? '?'}/${row.model ?? '?'}`;
+			if (kind === 'subagent') return `${row.provider ?? 'spawn'}${typeof row.agentModel === 'string' && row.agentModel.length > 0 ? ` · ${row.agentModel}` : ''}`;
+			return row.executable ?? row.preset ?? 'cli';
+		}
+
+		/**
+		 * 顶部「启用的评审者」列表：从定义里挑出可选项，并保留「配置里选中但已不在定义里」的 id，
+		 * 免得用户改个 id 就静默丢掉了选择。
+		 */
+		function reviewerChoices(reviewersText, selectedText) {
+			const selected = splitList(selectedText);
+			const rows = reviewerRows(reviewersText);
+			const usable = rows.filter((row) => row.enabled !== false && typeof row.id === 'string' && row.id.trim().length > 0);
+			const choices = usable.map((row) => ({
+				id: row.id,
+				label: typeof row.label === 'string' && row.label.trim().length > 0 ? row.label : row.id,
+				kind: row.kind ?? 'cli',
+				target: reviewerTarget(row),
+				checked: selected.includes(row.id),
+			}));
+			const unknown = selected.filter((id) => !choices.some((choice) => choice.id === id)).map((id) => ({ id, label: id, kind: 'unknown', target: '', checked: true }));
+			return {
+				choices,
+				unknown,
+				disabledCount: rows.filter((row) => row.enabled === false).length,
+				selectedCount: choices.filter((choice) => choice.checked).length + unknown.length,
+			};
+		}
+
+		/** 勾选/取消一项 → 新的逗号分隔文本（空列表写成空串 = 清除这一项）。 */
+		function toggleSelection(selectedText, id, next) {
+			const list = splitList(selectedText);
+			const updated = next ? (list.includes(id) ? list : [...list, id]) : list.filter((value) => value !== id);
+			return updated.join(', ');
+		}
+
 		/** CLI 预设 → 默认可执行文件名。 */
 		function presetExecutable(preset) {
 			return preset === 'cursor' ? 'cursor-agent' : preset;
@@ -433,31 +496,41 @@ window.__ModuleLoader__.load({
 
 		/** 字段清单：顺序即渲染顺序；`reviewers`/`modes` 由结构化编辑器接管，但仍在这里注册 spec。 */
 		const FIELDS = [
-			{ path: 'language', spec: choiceField('language', ['zh', 'en', 'auto']), control: 'segmented', group: 'behavior' },
-			{ path: 'injectPolicy', spec: boolField('injectPolicy'), control: 'switch', group: 'behavior' },
-			{ path: 'defaultMode', spec: choiceField('defaultMode', []), control: 'mode', group: 'behavior' },
-			{ path: 'defaultReviewers', spec: listField('defaultReviewers'), control: 'checklist', group: 'behavior' },
-			{ path: 'reviewers', spec: reviewersField('reviewers'), control: 'reviewers', group: 'reviewers' },
-			{ path: 'modes', spec: modesField('modes'), control: 'modes', group: 'reviewers' },
-			{ path: 'discover.enabled', spec: boolField('discover.enabled'), control: 'switch', group: 'discover' },
-			{ path: 'discover.providers', spec: listField('discover.providers'), control: 'providerChecklist', group: 'discover' },
-			{ path: 'discover.include', spec: listField('discover.include'), control: 'text', group: 'discover' },
-			{ path: 'discover.exclude', spec: listField('discover.exclude'), control: 'text', group: 'discover' },
-			{ path: 'discover.label', spec: P.settingsTextField('discover.label'), control: 'text', group: 'discover' },
-			{ path: 'discover.inDefault', spec: boolField('discover.inDefault'), control: 'switch', group: 'discover' },
-			{ path: 'discover.adHoc', spec: boolField('discover.adHoc'), control: 'switch', group: 'discover' },
-			{ path: 'waitMs', spec: numberField('waitMs', 0), control: 'number', numeric: true, group: 'budget' },
-			{ path: 'hardTimeoutMs', spec: numberField('hardTimeoutMs', 0), control: 'number', numeric: true, group: 'budget' },
-			{ path: 'maxResultChars', spec: numberField('maxResultChars', 0), control: 'number', numeric: true, group: 'budget' },
-			{ path: 'maxDiffChars', spec: numberField('maxDiffChars', 0), control: 'number', numeric: true, group: 'budget' },
-			{ path: 'maxFileDiffChars', spec: numberField('maxFileDiffChars', 0), control: 'number', numeric: true, group: 'budget' },
-			{ path: 'maxUntrackedFileChars', spec: numberField('maxUntrackedFileChars', 0), control: 'number', numeric: true, group: 'budget' },
-			{ path: 'maxArgBytes', spec: numberField('maxArgBytes', 1), control: 'number', numeric: true, group: 'budget' },
+			// defaultReviewers 由顶部那屏列表渲染（section 'active'），但仍要在这里注册 spec，
+			// 否则 SettingsFormModel 不认识这个字段，勾选写不回去。
+			{ path: 'defaultReviewers', spec: listField('defaultReviewers'), control: 'active', section: 'active', group: 'active' },
+			// 只有 reviewers 常显；其余全部归入「高级配置」的子分组。
+			{ path: 'reviewers', spec: reviewersField('reviewers'), control: 'reviewers', section: 'reviewers', group: 'reviewers' },
+			{ path: 'language', spec: choiceField('language', ['zh', 'en', 'auto']), control: 'segmented', section: 'advanced', group: 'behavior' },
+			{ path: 'injectPolicy', spec: boolField('injectPolicy'), control: 'switch', section: 'advanced', group: 'behavior' },
+			{ path: 'defaultMode', spec: choiceField('defaultMode', []), control: 'mode', section: 'advanced', group: 'behavior' },
+			{ path: 'modes', spec: modesField('modes'), control: 'modes', section: 'advanced', group: 'modes' },
+			{ path: 'discover.enabled', spec: boolField('discover.enabled'), control: 'switch', section: 'advanced', group: 'discover' },
+			{ path: 'discover.providers', spec: listField('discover.providers'), control: 'providerChecklist', section: 'advanced', group: 'discover' },
+			{ path: 'discover.include', spec: listField('discover.include'), control: 'text', section: 'advanced', group: 'discover' },
+			{ path: 'discover.exclude', spec: listField('discover.exclude'), control: 'text', section: 'advanced', group: 'discover' },
+			{ path: 'discover.label', spec: P.settingsTextField('discover.label'), control: 'text', section: 'advanced', group: 'discover' },
+			{ path: 'discover.inDefault', spec: boolField('discover.inDefault'), control: 'switch', section: 'advanced', group: 'discover' },
+			{ path: 'discover.adHoc', spec: boolField('discover.adHoc'), control: 'switch', section: 'advanced', group: 'discover' },
+			{ path: 'waitMs', spec: numberField('waitMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
+			{ path: 'hardTimeoutMs', spec: numberField('hardTimeoutMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
+			{ path: 'maxResultChars', spec: numberField('maxResultChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
+			{ path: 'maxDiffChars', spec: numberField('maxDiffChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
+			{ path: 'maxFileDiffChars', spec: numberField('maxFileDiffChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
+			{ path: 'maxUntrackedFileChars', spec: numberField('maxUntrackedFileChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
+			{ path: 'maxArgBytes', spec: numberField('maxArgBytes', 1), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
 		];
 
-		const GROUPS = [
-			{ key: 'behavior', label: 'groupBehavior' },
+		/** 常显分区（按用户关注顺序：先「启用哪些」，再「定义了哪些」）。 */
+		const BASIC_SECTIONS = [
+			{ key: 'active', label: 'groupActive' },
 			{ key: 'reviewers', label: 'groupReviewers' },
+		];
+
+		/** 「高级配置」里的子分组顺序。 */
+		const ADVANCED_GROUPS = [
+			{ key: 'behavior', label: 'groupBehavior' },
+			{ key: 'modes', label: 'groupModes' },
 			{ key: 'discover', label: 'groupDiscover' },
 			{ key: 'budget', label: 'groupBudget' },
 		];
@@ -1013,9 +1086,72 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/** 可折叠分区：高级配置默认收起。 */
+		function CollapsibleSection(props) {
+			return h(
+				'section',
+				{ className: 'dsh-review-group' },
+				h(
+					'button',
+					{
+						type: 'button',
+						id: props.id,
+						className: 'dsh-review-group-head',
+						'aria-expanded': props.open,
+						onClick: props.onToggle,
+					},
+					h('span', { className: 'dsh-review-caret' }, props.open ? '▾' : '▸'),
+					h('span', { className: 'dsh-review-group-title' }, props.title),
+					h('span', { className: 'dsh-review-group-action' }, props.open ? props.collapseLabel : props.expandLabel),
+				),
+				props.hint ? h('p', { className: 'dsh-review-hint' }, props.hint) : null,
+				props.open ? h('div', { className: 'dsh-review-group-body' }, props.children) : null,
+			);
+		}
+
+		/**
+		 * 顶部列表：勾选要用的评审者。
+		 *
+		 * 这里只列「评审者定义」里启用的项——用户最关心的就是这一屏，所以放在最上面，
+		 * 而且勾选是唯一入口（一个都不勾 = 不启用，与宿主侧语义一致）。
+		 */
+		function ActiveReviewers(props) {
+			const { t, reviewersText, selectedText, disabled, onToggle } = props;
+			const info = reviewerChoices(reviewersText, selectedText);
+			const rows = [...info.choices, ...info.unknown];
+			return h(
+				'div',
+				{ className: 'dsh-review-active' },
+				rows.length === 0
+					? h('p', { className: 'dsh-review-hint' }, t('activeEmpty'))
+					: h(
+							'ul',
+							{ className: 'dsh-review-active-list' },
+							rows.map((row) =>
+								h(
+									'li',
+									{ key: row.id, className: 'dsh-review-active-item' },
+									h(P.Switch, { checked: row.checked, label: '', disabled, onChange: (next) => onToggle(row.id, next) }),
+									h(
+										'span',
+										{ className: 'dsh-review-active-text' },
+										h('span', { className: 'dsh-review-active-name' }, row.label),
+										h('code', { className: 'dsh-review-active-id' }, row.id),
+										h('span', { className: 'dsh-review-active-meta' }, `${row.kind}${row.target.length > 0 ? ` · ${row.target}` : ''}`),
+									),
+								),
+							),
+						),
+				info.selectedCount === 0 && rows.length > 0 ? h('p', { className: 'dsh-review-invalid' }, t('activeNoneSelected')) : null,
+				info.disabledCount > 0 ? h('p', { className: 'dsh-review-hint' }, t('activeDisabledNote').replace('{count}', String(info.disabledCount))) : null,
+				info.unknown.length > 0 ? h('p', { className: 'dsh-review-hint' }, `${t('activeUnknownNote')}${info.unknown.map((row) => row.id).join('、')}`) : null,
+			);
+		}
+
 		/** dsh-review 的配置页。 */
 		function ReviewConfigPage(props) {
 			const t = props.t;
+			const [advancedOpen, setAdvancedOpen] = useState(false);
 			const view = props.useReviewConfigForm((snapshot) => snapshot);
 			const catalog = typeof props.useReviewCatalog === 'function' ? props.useReviewCatalog((snapshot) => snapshot) : props.catalog;
 			if (props.view === 'summary') return t('summary');
@@ -1025,31 +1161,65 @@ window.__ModuleLoader__.load({
 			const modesText = view.fields.modes?.text ?? '';
 			// 只给 discover.enabled 用：把宿主的推断镜像成开关的真实状态。
 			const discoverEnabledEffective = effectiveDiscoverEnabled(view.fields['discover.enabled']?.text, view.fields['discover.providers']?.text, view.fields['discover.include']?.text);
+			const renderField = (field) =>
+				field.control === 'reviewers' || field.control === 'modes'
+					? h(StructuredEditor, { key: field.path, t, field, state: view.fields[field.path], actions, disabled, catalog, reviewersText })
+					: h(Field, {
+							key: field.path,
+							t,
+							field,
+							state: view.fields[field.path],
+							actions,
+							disabled,
+							catalog,
+							reviewersText,
+							modesText,
+							switchChecked: field.path === 'discover.enabled' ? discoverEnabledEffective : undefined,
+						});
 			return h(
 				P.SettingsForm,
 				{ labels: formLabels(t), state: view.shell, onSave: props.save, onDiscard: props.discard },
 				catalog?.status === 'loading' ? h('p', { className: 'dsh-review-hint' }, t('catalogLoading')) : null,
 				catalog?.status === 'error' ? h('p', { className: 'dsh-review-hint' }, t('catalogFailed')) : null,
-				GROUPS.map((group) =>
-					h(
-						'section',
-						{ key: group.key, className: 'dsh-review-group' },
-						h('h4', { className: 'dsh-review-group-title' }, t(group.label)),
-						FIELDS.filter((field) => field.group === group.key).map((field) =>
-							field.control === 'reviewers' || field.control === 'modes'
-								? h(StructuredEditor, { key: field.path, t, field, state: view.fields[field.path], actions, disabled, catalog, reviewersText })
-								: h(Field, {
-										key: field.path,
-										t,
-										field,
-										state: view.fields[field.path],
-										actions,
-										disabled,
-										catalog,
-										reviewersText,
-										modesText,
-										switchChecked: field.path === 'discover.enabled' ? discoverEnabledEffective : undefined,
-									}),
+				// 1) 用户最关心的：启用哪些评审者（最上面）
+				h(
+					'section',
+					{ className: 'dsh-review-group', 'data-section': 'active' },
+					h('h4', { className: 'dsh-review-group-title' }, t('groupActive')),
+					h('p', { className: 'dsh-review-hint' }, t('activeHint')),
+					h(ActiveReviewers, {
+						t,
+						reviewersText,
+						selectedText: view.fields.defaultReviewers?.text ?? '',
+						disabled,
+						onToggle: (id, next) => actions.edit('defaultReviewers', toggleSelection(view.fields.defaultReviewers?.text ?? '', id, next)),
+					}),
+				),
+				// 2) 这些评审者是怎么定义的
+				h(
+					'section',
+					{ className: 'dsh-review-group', 'data-section': 'reviewers' },
+					h('h4', { className: 'dsh-review-group-title' }, t('groupReviewers')),
+					FIELDS.filter((field) => field.section === 'reviewers').map(renderField),
+				),
+				// 3) 高级配置：默认收起
+				h(
+					CollapsibleSection,
+					{
+						id: 'dsh-review-advanced',
+						title: t('groupAdvanced'),
+						hint: t('advancedHint'),
+						open: advancedOpen,
+						expandLabel: t('expandSection'),
+						collapseLabel: t('collapseSection'),
+						onToggle: () => setAdvancedOpen(!advancedOpen),
+					},
+					ADVANCED_GROUPS.map((group) =>
+						h(
+							'div',
+							{ key: group.key, className: 'dsh-review-subgroup' },
+							h('h5', { className: 'dsh-review-subgroup-title' }, t(group.label)),
+							FIELDS.filter((field) => field.section === 'advanced' && field.group === group.key).map(renderField),
 						),
 					),
 				),
@@ -1186,12 +1356,16 @@ window.__ModuleLoader__.load({
 			serializeModes,
 			cleanupModeBody,
 			effectiveDiscoverEnabled,
+			reviewerTarget,
+			reviewerChoices,
+			toggleSelection,
 			catalogGroups,
 			selectOptions,
 			newReviewerRow,
 			presetExecutable,
 			FIELDS,
-			GROUPS,
+			BASIC_SECTIONS,
+			ADVANCED_GROUPS,
 			KINDS,
 			CLI_PRESETS,
 			STRENGTHS,
