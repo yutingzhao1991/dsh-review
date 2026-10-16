@@ -111,8 +111,9 @@ function buildToolDescription(settings) {
 		'',
 		schemaAvailable ? '配置也可以在 GUI 里改：侧边栏 Plugins → dsh-review 的行/包页面（解析与保存都由宿主负责）。' : 'GUI 表单在本部署不可用（找不到 @deepseek-ai/schemastery），配置请改 profile 的 cordis.patch.yml。',
 		'不传参数时评审工作区里 staged / unstaged / untracked 的全部改动。',
-		'`base` / `commit` 与 `instructions` 互斥（codex CLI 的 PROMPT 与范围开关不能同时出现），要「评某个范围 + 附加关注点」请用 `mode`。',
-		'评审通常要跑几分钟：等待超过插件等待时长会返回 job id，用 job_output 读取结果；跑完会自动通知。',
+		'参数规则：`base`、`commit`、`instructions` **三者最多给一个**（`base` 与 `commit` 互斥；给了 `base`/`commit` 就不能再给 `instructions`——codex CLI 的范围开关与 PROMPT 不能同时出现）。要「某个范围 + 附加关注点」，把关注点写进 `mode` 的提示词。',
+		'`reviewers` 只能从上面列出的评审者里选，写别的 id 会直接报错（插件没有「按需指名模型」这条路）。',
+		'评审通常要跑几分钟：默认**立即**返回 job id（不等待），用 job_output 读结果，跑完会自动通知；调用方可自行决定什么时候放弃。',
 	);
 	return lines.join('\n');
 }
@@ -133,11 +134,11 @@ function buildParameters(settings) {
 			reviewers: {
 				type: 'array',
 				items: { type: 'string' },
-				description: `要使用的评审者 id。${reviewersHint}`,
+				description: `要使用的评审者 id，只能从这些里选：${enabled.map((reviewer) => reviewer.id).join(', ') || '（当前没有启用的评审者）'}。${reviewersHint}`,
 			},
 			mode: { type: 'string', description: `评审模式（强度、提示词、评审者集合）。${modeHint}` },
-			base: { type: 'string', description: '评审当前工作区相对该分支的改动（如 "main"）。与 commit、instructions 互斥。' },
-			commit: { type: 'string', description: '评审该提交引入的改动（commit sha）。与 base、instructions 互斥。' },
+			base: { type: 'string', description: '评审当前工作区相对该分支的改动（如 "main"）。与 commit、instructions 互斥，三者最多给一个。' },
+			commit: { type: 'string', description: '评审该提交引入的改动（commit sha）。与 base、instructions 互斥，三者最多给一个。' },
 			instructions: {
 				type: 'string',
 				description: '附加评审指令，用来聚焦关注点（如「只看并发与错误处理」）。与 base、commit 互斥；这时按未提交的改动评审。',

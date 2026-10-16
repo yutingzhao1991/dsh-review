@@ -304,6 +304,15 @@ console.log('\nB. 工具描述与参数校验');
 	check('B 描述列出评审者', description.includes('`codex`') && description.includes('`claude`'));
 	check('B 描述列出模式', description.includes('`deep`') && description.includes('彻底评审'));
 	check('B 描述强调 base/commit 与 instructions 互斥', description.includes('互斥'));
+	// 实测反馈：agent 会先撞上「base 与 commit 只能给一个」，说明这句必须写在描述里
+	check('B 描述写明三者最多给一个', description.includes('三者最多给一个'), description.slice(-500));
+	check('B 描述说明 reviewers 只能从列表里选', description.includes('只能从上面列出的评审者里选'));
+	check('B 描述说明默认立即返回 job id', description.includes('立即') && description.includes('job_output'));
+	{
+		const props = h.definition.parameters.properties;
+		check('B reviewers 参数列出可选 id', props.reviewers.description.includes('codex') && props.reviewers.description.includes('claude'), props.reviewers.description);
+		check('B base 参数说明三者最多给一个', props.base.description.includes('三者最多给一个') && props.commit.description.includes('三者最多给一个'));
+	}
 	check('B 参数含 reviewers/mode/base/commit/instructions', Object.keys(h.definition.parameters.properties).join(',') === 'reviewers,mode,base,commit,instructions');
 	check('B presentCall 是 terminal 卡片', h.definition.presentCall({ reviewers: ['codex'], base: 'main' }).title === 'review(codex) --base main');
 
