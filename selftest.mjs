@@ -1,6 +1,12 @@
 /**
  * 运行：node selftest.mjs
  *
+ * 分区（按此顺序跑）：
+ *   A 配置归一化        B 工具描述与参数校验   C CLI 评审者
+ *   D LLM 评审者        E 子智能体评审者      F 编排
+ *   G 边界              H 回归                I 模型发现与按需指名
+ *   J 浏览器半边        J2 自动保存           K GUI 配置的宿主半边
+ *
  * 假 ctx 自测：不起宿主进程，也不跑真的 codex / 模型。覆盖
  *
  * - 配置归一化（agents / models / reviewers 展开、非法项降级、模式解析、评审者选择）；
@@ -585,16 +591,27 @@ console.log('\nF. 编排');
 	if (kept !== null) rmSync(join(kept[1], '..'), { recursive: true, force: true });
 }
 {
-	// 系统提示词注入：默认关闭；打开后才注册 section。
+	// 系统提示词注入：section 始终注册，正文按**当前**配置现算（injectPolicy 与 when 都是
+	// GUI 可改的 volatile 字段，注册时算一次就会过期）。
 	const makePrompt = () => ({ sections: [], section(section) { this.sections.push(section); return () => {}; }, getSectionOrder: () => 2900 });
 	const off = makePrompt();
-	await loadPlugin({ plugin: { modes: { strict: { when: 'always' } } }, services: { systemPrompt: off }, harness: {} });
-	check('F 默认不注入策略', off.sections.length === 0);
-	const on = makePrompt();
-	await loadPlugin({ plugin: { injectPolicy: true, modes: { strict: { when: 'always' } } }, services: { systemPrompt: on }, harness: {} });
-	check('F injectPolicy 打开后注册 section', on.sections.length === 1 && on.sections[0].name === 'review:policy', JSON.stringify(on.sections));
-	check('F 策略文本说明强制评审', on.sections[0].text.includes('任何改动都必须经过') && on.sections[0].text.includes('review'));
-	check('F section 顺序在工具区之前', on.sections[0].order === 2899, String(on.sections[0].order));
+	const h = await loadPlugin({ plugin: { modes: { strict: { when: 'always' } } }, services: { systemPrompt: off }, harness: {} });
+	check('F 始终注册策略段落', off.sections.length === 1 && off.sections[0].name === 'review:policy', JSON.stringify(off.sections.map((s) => s.name)));
+	check('F 默认不注入（正文为空）', off.sections[0].text() === '', JSON.stringify(off.sections[0].text()));
+	// 模拟 GUI 打开 injectPolicy：不需要重载插件，正文立刻出现
+	h.config.injectPolicy = true;
+	check('F 打开注入后正文立即出现', off.sections[0].text().includes('任何改动都必须经过') && off.sections[0].text().includes('review'));
+	// 再关掉：正文立刻消失（旧的实现在这里会留下过期文本）
+	h.config.injectPolicy = false;
+	check('F 关掉注入后正文立即消失', off.sections[0].text() === '', JSON.stringify(off.sections[0].text()));
+	// 改模式里的 when 同样立即反映
+	h.config.injectPolicy = true;
+	h.config.modes.strict.when = 'never';
+	check('F 改 when 后正文跟着变', off.sections[0].text().includes('本模式不强制评审'), off.sections[0].text());
+	const quiet = makePrompt();
+	await loadPlugin({ plugin: { injectPolicy: true, modes: { quick: { strength: 'light' } } }, services: { systemPrompt: quiet }, harness: {} });
+	check('F 没有 when 时正文为空', quiet.sections[0].text() === '', JSON.stringify(quiet.sections[0].text()));
+	check('F section 顺序在工具区之前', quiet.sections[0].order === 2899, String(quiet.sections[0].order));
 }
 
 /* ────────────────────────────── G. 非 git 目录 / 空改动 ────────────────────────────── */
@@ -941,7 +958,7 @@ console.log('\nJ. 浏览器半边');
  * 工厂只要 react 与 primitives 两个 external，所以替身足够跑通 apply、纯逻辑与渲染树。
  */
 async function loadClientBundle(options = {}) {
-	const captured = { registrations: [], slots: [], locales: [], effects: [], models: [], scope: undefined, entry: undefined, served: undefined };
+	const captured = { registrations: [], slots: [], locales: [], effects: [], disposers: [], models: [], scope: undefined, entry: undefined, served: undefined };
 	const asArray = (value) => (value === undefined || value === null || value === false ? [] : Array.isArray(value) ? value.flat() : [value]);
 	// React 会把 children 同时放进 props.children；桩件也照做，组件内部才能读到 props.children。
 	const react = {
@@ -968,6 +985,8 @@ async function loadClientBundle(options = {}) {
 			this.failuresLeft = options.saveFailures ?? 0;
 			this.saveCalls = 0;
 			this.discardCalls = 0;
+			this.editLog = [];
+			this.resetLog = [];
 			captured.models.push(this);
 		}
 		bind(project) {
@@ -986,11 +1005,13 @@ async function loadClientBundle(options = {}) {
 		}
 		actions() {
 			return {
-				edit: () => {
+				edit: (field) => {
 					this.dirty = true;
+					this.editLog.push(field);
 				},
-				resetField: () => {
+				resetField: (field) => {
 					this.dirty = true;
+					this.resetLog.push(field);
 				},
 				save: () => this.save(),
 				discard: () => {
@@ -1002,6 +1023,7 @@ async function loadClientBundle(options = {}) {
 		}
 		async save() {
 			this.saveCalls += 1;
+			if (options.saveThrows === true) throw new Error('transport down');
 			if (this.saving) return; // 与官方一致：保存中再调会被直接挡掉
 			this.saving = true;
 			const delay = options.saveDelayMs ?? 0;
@@ -1080,7 +1102,12 @@ async function loadClientBundle(options = {}) {
 				return () => {};
 			},
 		},
-		effect: (fn, label) => (captured.effects.push(label), fn()),
+		effect: (fn, label) => {
+			captured.effects.push(label);
+			const dispose = fn();
+			captured.disposers.push(dispose);
+			return dispose;
+		},
 		get: (service) => (service === 'remote.session' ? { modelCatalog: async () => catalogResult } : undefined),
 	};
 
@@ -1178,6 +1205,19 @@ function findAll(node, predicate) {
 	check('J 生效值：什么都没写就不打开', I.effectiveDiscoverEnabled('', '', '') === false && I.effectiveDiscoverEnabled(undefined, undefined, undefined) === false);
 	check('J cleanupModeBody 删掉空值', JSON.stringify(I.cleanupModeBody({ when: '', synthesize: undefined, reviewers: [], strength: 'deep', minChangedLines: Number.NaN })) === JSON.stringify({ strength: 'deep' }));
 
+	// ── glob 语义：include/exclude 全靠它，匹配错了会静默筛掉/留下错误的模型 ──
+	{
+		const { matchesPattern } = await import(new URL('./lib/discovery.js', import.meta.url).href);
+		check('J glob 裸模式按模型名匹配', matchesPattern('*embed*', 'bailian', 'text-embedding-v3') === true);
+		check('J glob 裸模式不匹配无关模型', matchesPattern('*embed*', 'bailian', 'qwen3.8-max') === false);
+		check('J glob 带 / 时按 provider/model 匹配', matchesPattern('bailian/qwen*', 'bailian', 'qwen3.8-max') === true);
+		check('J glob 带 / 时看 provider', matchesPattern('bailian/qwen*', 'deepseek-official', 'qwen3.8-max') === false);
+		check('J glob 大小写不敏感', matchesPattern('QWEN*', 'bailian', 'qwen3.8-max') === true);
+		check('J glob ? 匹配单个字符', matchesPattern('qwen?.8-max', 'bailian', 'qwen3.8-max') === true && matchesPattern('qwen?.8-max', 'bailian', 'qwen38-max') === false);
+		check('J glob 不做部分匹配（整串锚定）', matchesPattern('qwen', 'bailian', 'qwen3.8-max') === false);
+		check('J glob 特殊字符按字面处理', matchesPattern('a.b*', 'p', 'a.bc') === true && matchesPattern('a.b*', 'p', 'axbc') === false);
+	}
+
 	// ── 目录映射与选项推导 ──
 	const groups = I.catalogGroups({ groups: [{ id: 'bailian', name: '百炼', models: [{ id: 'qwen3.8-max' }] }, { nonsense: true }, { id: 'x', models: [null, { id: 'ok' }] }] });
 	check('J catalogGroups 过滤坏形状', groups.length === 2 && groups[0].name === '百炼' && groups[1].models.length === 1, JSON.stringify(groups.map((g) => g.id)));
@@ -1211,6 +1251,25 @@ function findAll(node, predicate) {
 	const model = captured.models[0];
 	const spec = (name) => model.specs.find((entry) => entry.field === name);
 	check('J 注册中英字典', captured.locales.length === 1 && captured.locales[0].ns === 'dsh-review' && Boolean(captured.locales[0].dictionaries.zh) && Boolean(captured.locales[0].dictionaries.en));
+	// ── 字典：中英必须一一对应，否则英文界面会显示成键名 ──
+	{
+		const dictionaries = captured.locales[0].dictionaries;
+		const zhKeys = Object.keys(dictionaries.zh).sort();
+		const enKeys = Object.keys(dictionaries.en).sort();
+		check('J 中英字典键完全一致', JSON.stringify(zhKeys) === JSON.stringify(enKeys), `只在 zh: ${zhKeys.filter((k) => !enKeys.includes(k)).join(',')} / 只在 en: ${enKeys.filter((k) => !zhKeys.includes(k)).join(',')}`);
+		check('J 字典键数量合理', zhKeys.length >= 100, String(zhKeys.length));
+		// 每个键都要被用到（t('key')、三元里的键、以及 FIELDS 里的 label/hint）
+		const source = readFileSync(new URL('./client/client.js', import.meta.url), 'utf8');
+		const used = new Set([...source.matchAll(/t\('([A-Za-z0-9]+)'\)/g)].map((match) => match[1]));
+		for (const match of source.matchAll(/\?\s*'([A-Za-z0-9]+)'\s*:\s*'([A-Za-z0-9]+)'/g)) {
+			used.add(match[1]);
+			used.add(match[2]);
+		}
+		for (const match of source.matchAll(/(?:label|hint|invalid):\s*'([A-Za-z0-9]+)'/g)) used.add(match[1]);
+		const unused = zhKeys.filter((key) => !used.has(key));
+		check('J 没有没人用的文案键', unused.length === 0, unused.join(','));
+	}
+
 	check('J 读取 review 命名空间', captured.entry === 'review', captured.entry);
 	check('J 只在宿主 serve 命名空间时挂载', JSON.stringify(captured.served) === JSON.stringify(['review']), JSON.stringify(captured.served));
 	check('J 行页与包页两个槽位都占', JSON.stringify(captured.slots) === JSON.stringify(['plugins.row.config', 'plugins.bundle.config']), JSON.stringify(captured.slots));
@@ -1263,6 +1322,10 @@ function findAll(node, predicate) {
 	check('J 已勾选时不显示告警', findAll(element, (node) => node.props?.className === 'dsh-review-invalid').length === 0);
 	// 评审者定义区：行编辑器 + 增删都在
 	check('J 每行评审者有删除按钮', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length === 2, String(findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length));
+	// 行 key 必须是位置：id / 模式名是可编辑的，把它们放进 key 会让每敲一个字符就换 key、
+	// 输入框被重新挂载从而失焦。桩件不保留 React 的 key，所以直接查源码这条不变量。
+	const source = readFileSync(new URL('./client/client.js', import.meta.url), 'utf8');
+	check('J 行 key 不来自可编辑值', !/key: `\$\{row\.(id|name)/.test(source) && (source.match(/key: index,/g) ?? []).length === 2, String((source.match(/key: index,/g) ?? []).length));
 	check('J 有添加评审者按钮', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'addReviewer').length === 1);
 	check('J JSON 兜底默认收起', findAll(element, (node) => node.type === 'SettingsValueField').length === 0);
 }
@@ -1415,8 +1478,29 @@ console.log('\nJ2. 自动保存');
 	face.edit('language', 'en');
 	check('J2 待写时还未落盘', model.saveCalls === 0);
 	face.discard();
+	await new Promise((resolve) => setTimeout(resolve, 40));
 	check('J2 离开页面前先落盘', model.saveCalls === 1, String(model.saveCalls));
 	check('J2 之后才丢弃草稿', model.discardCalls === 1 && model.dirty === false);
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// codex 评审发现的场景：保存还在途中时又编辑，然后立刻离开页面。
+	// 官方模型会拒绝并发保存，若此时 discard 清掉草稿，最后那几个字就丢了。
+	const { mod, ctx, captured } = await loadClientBundle({ saveDelayMs: 40 });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 15)); // 第一次写入在途中
+	face.edit('language', 'en-US'); // 落在保存期间
+	face.discard(); // 立刻离开页面
+	await new Promise((resolve) => setTimeout(resolve, 160));
+	check('J2 离开时不丢在途编辑（写了第二轮）', model.saveCalls >= 2, String(model.saveCalls));
+	check('J2 离开时草稿已写完才丢弃', model.dirty === false && model.discardCalls === 1, `${model.dirty}/${model.discardCalls}`);
+	check('J2 最终状态是 saved', face.hooks.reviewAutosave.getSnapshot().status === 'saved', face.hooks.reviewAutosave.getSnapshot().status);
 	I.AUTO.delayMs = 500;
 }
 
@@ -1450,6 +1534,57 @@ console.log('\nJ2. 自动保存');
 	await new Promise((resolve) => setTimeout(resolve, 120));
 	check('J2 保存期间的编辑会再写一轮', model.saveCalls >= 2, String(model.saveCalls));
 	check('J2 最终状态是 saved（没有挂着的草稿）', face.hooks.reviewAutosave.getSnapshot().status === 'saved' && model.dirty === false, `${face.hooks.reviewAutosave.getSnapshot().status}/${model.dirty}`);
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 保存抛异常：状态必须落到 failed，不能永远卡在 saving，而且之后手动保存还能再试。
+	const { mod, ctx, captured } = await loadClientBundle({ saveThrows: true });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 保存抛异常时状态为 failed', face.hooks.reviewAutosave.getSnapshot().status === 'failed', face.hooks.reviewAutosave.getSnapshot().status);
+	check('J2 抛异常也会再重试一次', model.saveCalls === 2, String(model.saveCalls));
+	face.save();
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	check('J2 抛异常后仍可手动再试', model.saveCalls >= 3, String(model.saveCalls));
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 冲突恢复只重放「用户动过的字段」，不能整表重放（否则可能覆盖别处对其它字段的修改）。
+	const { mod, ctx, captured } = await loadClientBundle({ saveFailures: 1 });
+	const I = mod.__internals;
+	I.AUTO.delayMs = 5;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	check('J2 冲突恢复只重放动过的字段', [...new Set(model.editLog)].join(',') === 'language', JSON.stringify(model.editLog));
+	check('J2 冲突恢复没有重放整表', model.editLog.length <= 3, String(model.editLog.length));
+	I.AUTO.delayMs = 500;
+}
+
+{
+	// 卸载后不该再有写入：待触发的定时器必须先被清掉。
+	const { mod, ctx, captured } = await loadClientBundle({});
+	const I = mod.__internals;
+	I.AUTO.delayMs = 30;
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	face.edit('language', 'en');
+	check('J2 卸载前已排了定时器', model.saveCalls === 0);
+	for (const dispose of captured.disposers) {
+		if (typeof dispose === 'function') dispose();
+	}
+	await new Promise((resolve) => setTimeout(resolve, 80));
+	check('J2 卸载后不再写入', model.saveCalls === 0, String(model.saveCalls));
 	I.AUTO.delayMs = 500;
 }
 

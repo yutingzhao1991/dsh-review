@@ -480,20 +480,29 @@ export function apply(ctx, config) {
 
 	// 可选：把模式的 when 策略写进系统提示词。默认关闭 —— 插件不替用户做约束。
 	const disposers = [disposeTool];
-	const policyText = buildPolicyText(settings);
-	if (settings.injectPolicy && policyText !== undefined) {
-		const systemPrompt = typeof ctx.get === 'function' ? ctx.get('systemPrompt') : undefined;
-		if (systemPrompt !== undefined && systemPrompt !== null) {
-			let order = 2_899;
-			try {
-				const base = systemPrompt.getSectionOrder('TOOL_REPORT');
-				if (typeof base === 'number') order = base - 1;
-			} catch {
-				/* 没有这个位置名就用兜底顺序 */
-			}
-			const disposeSection = systemPrompt.section({ name: 'review:policy', order, text: policyText });
-			disposers.push(disposeSection);
+	// 评审策略段落**始终注册**，但正文用函数按当前配置现算：
+	// `injectPolicy` 与模式的 when 都是 GUI 可改的 volatile 字段，注册时算一次会立刻过期
+	// （打开注入不生效、关掉还留着旧文本）。返回空串时渲染器会丢掉这一节，所以「不注入」
+	// 就等于这一节不存在。
+	const systemPrompt = typeof ctx.get === 'function' ? ctx.get('systemPrompt') : undefined;
+	if (systemPrompt !== undefined && systemPrompt !== null) {
+		let order = 2_899;
+		try {
+			const base = systemPrompt.getSectionOrder('TOOL_REPORT');
+			if (typeof base === 'number') order = base - 1;
+		} catch {
+			/* 没有这个位置名就用兜底顺序 */
 		}
+		const disposeSection = systemPrompt.section({
+			name: 'review:policy',
+			order,
+			text: () => {
+				const current = snapshot();
+				if (!current.injectPolicy) return '';
+				return buildPolicyText(current) ?? '';
+			},
+		});
+		disposers.push(disposeSection);
 	}
 
 	ctx.effect(() => () => {

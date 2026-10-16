@@ -5,6 +5,10 @@
  * 不需要构建工具：externals 只有 `react` 与 `@deepseek-ai/dsh-client-ui-primitives`，
  * 两者都由宿主的静态模块表提供。
  *
+ * **为什么是一个文件**：宿主按 `<id>/client.js` 一次取走整个客户端半边；拆成多文件要用
+ * 模块表的分包机制（`require.async`），对一个配置页不值得，所以这里是一份自包含的工厂。
+ * 内部按「字典 → 纯逻辑 → 字段 spec → 控件 → 编辑器 → 页面 → 挂载」分节，顺着读即可。
+ *
  * 表单本体不自造控件——直接用 DSH 官方那套 `SettingsForm` + `SettingsFormModel`，
  * 「暂存 → 保存 → revision 冲突 → 回读」与官方设置页完全一致。
  *
@@ -56,7 +60,6 @@ window.__ModuleLoader__.load({
 			activeNoneSelected: '一个都没勾 = 不启用任何评审者：这时调用 review 会直接报错，要求显式指定 reviewers。',
 			activeDisabledNote: '另有 {count} 个评审者被「启用」开关关掉了，不在这里列出。',
 			activeUnknownNote: '以下 id 在配置里被选中，但已不在评审者定义里（可能是改过 id）：',
-			activeTargetCli: 'CLI',
 			activeUnknownMeta: 'not in the reviewer definitions',
 			defaultModeNone: 'No mode',
 			activeUnknownMeta: '不在评审者定义里',
@@ -95,11 +98,9 @@ window.__ModuleLoader__.load({
 			noReviewers: '还没有评审者。先添加一个，或用下面的原始 JSON 直接写。',
 			addMode: '添加模式',
 			modeName: '模式名（工具参数 mode 用它）',
-			modeStrength: '强度',
 			modeReviewers: '用哪些评审者',
 			modeReviewersHint: '一个都不勾 = 用上面选定的默认集合。',
 			modeSynthesize: '合并结论',
-			modeSynthesizeHint: '评审者跑完后，让一个模型把结论合并去重。',
 			modeSynthesizeReviewer: '用哪个模型汇总',
 			modeWhen: '强制评审策略',
 			modeWhenHint: '只在「把评审策略写进系统提示词」打开时生效。',
@@ -149,7 +150,6 @@ window.__ModuleLoader__.load({
 			showJson: '显示原始 JSON',
 			hideJson: '收起原始 JSON',
 			jsonHint: '直接编辑存储值；保存时会校验（评审者必须是数组且每行有 id，模式必须是对象）。',
-			invalidJson: '不是合法 JSON（或类型不对）',
 			invalidReviewer: '每个评审者都要有 id，kind 只能是 cli / llm / subagent',
 			invalidMode: '每个模式都要有名字，strength 只能是 light / standard / deep',
 			invalidNumber: '需要一个不小于下限的整数',
@@ -158,7 +158,6 @@ window.__ModuleLoader__.load({
 			reset: '恢复默认',
 			readOnly: '本部署的设置为只读。',
 			unavailable: '该插件当前未加载，暂时无法配置。',
-			save: '保存',
 			saving: '保存中…',
 			saveFailed: '本部署没有接受这些值，已保留你的修改。',
 		};
@@ -176,7 +175,8 @@ window.__ModuleLoader__.load({
 			activeNoneSelected: 'Nothing checked means no reviewers are enabled: calling review would fail and ask for explicit reviewers.',
 			activeDisabledNote: '{count} more reviewer(s) are turned off by their “enabled” switch and are not listed here.',
 			activeUnknownNote: 'These ids are selected in the config but no longer defined (an id may have changed):',
-			activeTargetCli: 'CLI',
+			activeUnknownMeta: 'not in the reviewer definitions',
+			defaultModeNone: 'No mode',
 			defaultReviewers: 'Enabled reviewers',
 			defaultReviewersHint: 'Checked ones are used by default.',
 			groupBehavior: 'Review behaviour',
@@ -211,11 +211,9 @@ window.__ModuleLoader__.load({
 			noReviewers: 'No reviewers yet. Add one, or write them in the raw JSON below.',
 			addMode: 'Add mode',
 			modeName: 'Name (referenced by the tool’s mode argument)',
-			modeStrength: 'Strength',
 			modeReviewers: 'Reviewers to use',
 			modeReviewersHint: 'None selected means the default set chosen above.',
 			modeSynthesize: 'Merge findings',
-			modeSynthesizeHint: 'After the reviewers finish, one model merges and de-duplicates their findings.',
 			modeSynthesizeReviewer: 'Model that merges',
 			modeWhen: 'Mandatory-review policy',
 			modeWhenHint: 'Only takes effect while “write the review policy into the system prompt” is on.',
@@ -265,7 +263,6 @@ window.__ModuleLoader__.load({
 			showJson: 'Show raw JSON',
 			hideJson: 'Hide raw JSON',
 			jsonHint: 'Edits the stored value directly; saving validates it (reviewers must be an array of objects with ids, modes an object).',
-			invalidJson: 'Not valid JSON (or the wrong type)',
 			invalidReviewer: 'Every reviewer needs an id, and kind must be cli / llm / subagent',
 			invalidMode: 'Every mode needs a name, and strength must be light / standard / deep',
 			invalidNumber: 'Needs an integer at or above the minimum',
@@ -274,7 +271,6 @@ window.__ModuleLoader__.load({
 			reset: 'Reset to default',
 			readOnly: 'This deployment stores settings read-only.',
 			unavailable: 'This plugin is not loaded right now, so it cannot be configured.',
-			save: 'Save',
 			saving: 'Saving…',
 			saveFailed: 'This deployment did not accept these values; your edits were kept.',
 		};
@@ -534,35 +530,28 @@ window.__ModuleLoader__.load({
 
 		/** 字段清单：顺序即渲染顺序；`reviewers`/`modes` 由结构化编辑器接管，但仍在这里注册 spec。 */
 		const FIELDS = [
-			// defaultReviewers 由顶部那屏列表渲染（section 'active'），但仍要在这里注册 spec，
-			// 否则 SettingsFormModel 不认识这个字段，勾选写不回去。
-			{ path: 'defaultReviewers', spec: listField('defaultReviewers'), control: 'active', section: 'active', group: 'active' },
-			// 只有 reviewers 常显；其余全部归入「高级配置」的子分组。
-			{ path: 'reviewers', spec: reviewersField('reviewers'), control: 'reviewers', section: 'reviewers', group: 'reviewers' },
-			{ path: 'language', spec: choiceField('language', ['zh', 'en', 'auto']), control: 'segmented', section: 'advanced', group: 'behavior' },
-			{ path: 'injectPolicy', spec: boolField('injectPolicy'), control: 'switch', section: 'advanced', group: 'behavior' },
-			{ path: 'defaultMode', spec: choiceField('defaultMode', []), control: 'mode', section: 'advanced', group: 'behavior' },
-			{ path: 'modes', spec: modesField('modes'), control: 'modes', section: 'advanced', group: 'modes' },
-			{ path: 'discover.enabled', spec: boolField('discover.enabled'), control: 'switch', section: 'advanced', group: 'discover' },
-			{ path: 'discover.providers', spec: listField('discover.providers'), control: 'providerChecklist', section: 'advanced', group: 'discover' },
-			{ path: 'discover.include', spec: listField('discover.include'), control: 'text', section: 'advanced', group: 'discover' },
-			{ path: 'discover.exclude', spec: listField('discover.exclude'), control: 'text', section: 'advanced', group: 'discover' },
-			{ path: 'discover.label', spec: P.settingsTextField('discover.label'), control: 'text', section: 'advanced', group: 'discover' },
-			{ path: 'discover.inDefault', spec: boolField('discover.inDefault'), control: 'switch', section: 'advanced', group: 'discover' },
-			{ path: 'discover.adHoc', spec: boolField('discover.adHoc'), control: 'switch', section: 'advanced', group: 'discover' },
-			{ path: 'waitMs', spec: numberField('waitMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
-			{ path: 'hardTimeoutMs', spec: numberField('hardTimeoutMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
-			{ path: 'maxResultChars', spec: numberField('maxResultChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
-			{ path: 'maxDiffChars', spec: numberField('maxDiffChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
-			{ path: 'maxFileDiffChars', spec: numberField('maxFileDiffChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
-			{ path: 'maxUntrackedFileChars', spec: numberField('maxUntrackedFileChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
-			{ path: 'maxArgBytes', spec: numberField('maxArgBytes', 1), control: 'number', numeric: true, section: 'advanced', group: 'budget' },
-		];
-
-		/** 常显分区（按用户关注顺序：先「启用哪些」，再「定义了哪些」）。 */
-		const BASIC_SECTIONS = [
-			{ key: 'active', label: 'groupActive' },
-			{ key: 'reviewers', label: 'groupReviewers' },
+			// 每个字段自带文案键：以前另有一张 path → [label, hint] 的平行表，两处要对齐、
+			// 静态读代码也看不出哪个字段用了哪条文案。
+			{ path: 'defaultReviewers', spec: listField('defaultReviewers'), control: 'active', section: 'active', group: 'active', label: 'defaultReviewers', hint: 'defaultReviewersHint' },
+			{ path: 'reviewers', spec: reviewersField('reviewers'), control: 'reviewers', section: 'reviewers', group: 'reviewers', label: 'groupReviewers' },
+			{ path: 'language', spec: choiceField('language', ['zh', 'en', 'auto']), control: 'segmented', section: 'advanced', group: 'behavior', label: 'language', hint: 'languageHint' },
+			{ path: 'injectPolicy', spec: boolField('injectPolicy'), control: 'switch', section: 'advanced', group: 'behavior', label: 'injectPolicy', hint: 'injectPolicyHint' },
+			{ path: 'defaultMode', spec: choiceField('defaultMode', []), control: 'mode', section: 'advanced', group: 'behavior', label: 'defaultMode', hint: 'defaultModeHint' },
+			{ path: 'modes', spec: modesField('modes'), control: 'modes', section: 'advanced', group: 'modes', label: 'groupModes' },
+			{ path: 'discover.enabled', spec: boolField('discover.enabled'), control: 'switch', section: 'advanced', group: 'discover', label: 'discoverEnabled', hint: 'discoverEnabledHint' },
+			{ path: 'discover.providers', spec: listField('discover.providers'), control: 'providerChecklist', section: 'advanced', group: 'discover', label: 'discoverProviders', hint: 'discoverProvidersHint' },
+			{ path: 'discover.include', spec: listField('discover.include'), control: 'text', section: 'advanced', group: 'discover', label: 'discoverInclude', hint: 'discoverIncludeHint' },
+			{ path: 'discover.exclude', spec: listField('discover.exclude'), control: 'text', section: 'advanced', group: 'discover', label: 'discoverExclude', hint: 'discoverExcludeHint' },
+			{ path: 'discover.label', spec: P.settingsTextField('discover.label'), control: 'text', section: 'advanced', group: 'discover', label: 'discoverLabel', hint: 'discoverLabelHint' },
+			{ path: 'discover.inDefault', spec: boolField('discover.inDefault'), control: 'switch', section: 'advanced', group: 'discover', label: 'discoverInDefault', hint: 'discoverInDefaultHint' },
+			{ path: 'discover.adHoc', spec: boolField('discover.adHoc'), control: 'switch', section: 'advanced', group: 'discover', label: 'discoverAdHoc', hint: 'discoverAdHocHint' },
+			{ path: 'waitMs', spec: numberField('waitMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'waitMs', hint: 'waitMsHint' },
+			{ path: 'hardTimeoutMs', spec: numberField('hardTimeoutMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'hardTimeoutMs', hint: 'hardTimeoutMsHint' },
+			{ path: 'maxResultChars', spec: numberField('maxResultChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'maxResultChars', hint: 'maxResultCharsHint' },
+			{ path: 'maxDiffChars', spec: numberField('maxDiffChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'maxDiffChars', hint: 'maxDiffCharsHint' },
+			{ path: 'maxFileDiffChars', spec: numberField('maxFileDiffChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'maxFileDiffChars', hint: 'maxFileDiffCharsHint' },
+			{ path: 'maxUntrackedFileChars', spec: numberField('maxUntrackedFileChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'maxUntrackedFileChars', hint: 'maxUntrackedFileCharsHint' },
+			{ path: 'maxArgBytes', spec: numberField('maxArgBytes', 1), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'maxArgBytes', hint: 'maxArgBytesHint' },
 		];
 
 		/** 「高级配置」里的子分组顺序。 */
@@ -572,28 +561,6 @@ window.__ModuleLoader__.load({
 			{ key: 'discover', label: 'groupDiscover' },
 			{ key: 'budget', label: 'groupBudget' },
 		];
-
-		/** path → [标签键, 提示键]。 */
-		const LABELS = {
-			defaultReviewers: ['defaultReviewers', 'defaultReviewersHint'],
-			defaultMode: ['defaultMode', 'defaultModeHint'],
-			language: ['language', 'languageHint'],
-			injectPolicy: ['injectPolicy', 'injectPolicyHint'],
-			waitMs: ['waitMs', 'waitMsHint'],
-			hardTimeoutMs: ['hardTimeoutMs', 'hardTimeoutMsHint'],
-			maxResultChars: ['maxResultChars', 'maxResultCharsHint'],
-			maxDiffChars: ['maxDiffChars', 'maxDiffCharsHint'],
-			maxFileDiffChars: ['maxFileDiffChars', 'maxFileDiffCharsHint'],
-			maxUntrackedFileChars: ['maxUntrackedFileChars', 'maxUntrackedFileCharsHint'],
-			maxArgBytes: ['maxArgBytes', 'maxArgBytesHint'],
-			'discover.enabled': ['discoverEnabled', 'discoverEnabledHint'],
-			'discover.providers': ['discoverProviders', 'discoverProvidersHint'],
-			'discover.include': ['discoverInclude', 'discoverIncludeHint'],
-			'discover.exclude': ['discoverExclude', 'discoverExcludeHint'],
-			'discover.label': ['discoverLabel', 'discoverLabelHint'],
-			'discover.inDefault': ['discoverInDefault', 'discoverInDefaultHint'],
-			'discover.adHoc': ['discoverAdHoc', 'discoverAdHocHint'],
-		};
 
 		/** 字段 id：稳定且不含路径里的点，给 htmlFor 用。 */
 		function fieldId(path) {
@@ -718,6 +685,11 @@ window.__ModuleLoader__.load({
 
 		/* ────────────────────────── 评审者 / 模式编辑器 ────────────────────────── */
 
+		/** 「标签 + 控件」外壳：行内字段共用，`wide` 让长内容（例如可执行文件路径）占满整行。 */
+		function labelled(key, label, control, wide = false) {
+			return h('div', { key, className: `dsh-review-field${wide ? ' dsh-review-field--wide' : ''}` }, h('span', { className: 'dsh-review-label' }, label), control);
+		}
+
 		/** 一行评审者：kind 决定后面显示哪些字段。 */
 		function ReviewerRow(props) {
 			const { t, row, index, providerOptions, modelsFor, disabled } = props;
@@ -725,64 +697,55 @@ window.__ModuleLoader__.load({
 			const update = (patch) => props.onChange({ ...row, ...patch });
 			const fields = [];
 			if (kind === 'llm') {
+				// 下拉本身不带标题，用和单值字段一样的「标签 + 控件」外壳，免得两个按钮不知道各是什么。
 				fields.push(
-					h(Dropdown, {
-						key: 'provider',
+					labelled('provider', t('reviewerProvider'), h(Dropdown, {
 						id: `reviewer-${index}-provider`,
 						value: row.provider ?? '',
 						options: selectOptions(providerOptions, row.provider),
 						placeholder: t('providerMissing'),
 						disabled,
 						onChange: (value) => update({ provider: value, model: modelsFor(value)[0]?.value ?? row.model }),
-					}),
-					h(Dropdown, {
-						key: 'model',
+					})),
+					labelled('model', t('reviewerModel'), h(Dropdown, {
 						id: `reviewer-${index}-model`,
 						value: row.model ?? '',
 						options: selectOptions(modelsFor(row.provider), row.model),
 						placeholder: t('modelMissing'),
 						disabled,
 						onChange: (value) => update({ model: value }),
-					}),
+					})),
 				);
 			} else if (kind === 'subagent') {
 				fields.push(
-					h(P.Input, { key: 'provider', value: row.provider ?? '', placeholder: 'spawn', disabled, onChange: (event) => update({ provider: event.target.value }) }),
-					h(Dropdown, {
-						key: 'agentProvider',
+					labelled('provider', t('reviewerKindSubagent'), h(P.Input, { value: row.provider ?? '', placeholder: 'spawn', disabled, onChange: (event) => update({ provider: event.target.value }) })),
+					labelled('agentProvider', t('reviewerAgentProvider'), h(Dropdown, {
 						id: `reviewer-${index}-agent-provider`,
 						value: row.agentProvider ?? '',
 						options: selectOptions(providerOptions, row.agentProvider),
-						placeholder: t('reviewerAgentProvider'),
+						placeholder: t('providerMissing'),
 						disabled,
 						onChange: (value) => update({ agentProvider: value }),
-					}),
-					h(Dropdown, {
-						key: 'agentModel',
+					})),
+					labelled('agentModel', t('reviewerAgentModel'), h(Dropdown, {
 						id: `reviewer-${index}-agent-model`,
 						value: row.agentModel ?? '',
 						options: selectOptions(modelsFor(row.agentProvider), row.agentModel),
-						placeholder: t('reviewerAgentModel'),
+						placeholder: t('modelMissing'),
 						disabled,
 						onChange: (value) => update({ agentModel: value }),
-					}),
+					})),
 				);
 			} else {
 				fields.push(
-					h(Dropdown, {
-						key: 'preset',
+					labelled('preset', t('reviewerPreset'), h(Dropdown, {
 						id: `reviewer-${index}-preset`,
 						value: row.preset ?? 'custom',
 						options: CLI_PRESETS.map((preset) => ({ value: preset, label: preset })),
 						disabled,
 						onChange: (value) => update({ preset: value, executable: value === 'custom' ? row.executable : presetExecutable(value) }),
-					}),
-					h(
-						'div',
-						{ key: 'executable', className: 'dsh-review-field dsh-review-field--wide' },
-						h('span', { className: 'dsh-review-label' }, t('reviewerExecutable')),
-						h(P.Input, { id: `reviewer-${index}-executable`, value: row.executable ?? '', placeholder: 'codex', disabled, onChange: (event) => update({ executable: event.target.value }) }),
-					),
+					})),
+					labelled('executable', t('reviewerExecutable'), h(P.Input, { id: `reviewer-${index}-executable`, value: row.executable ?? '', placeholder: 'codex', disabled, onChange: (event) => update({ executable: event.target.value }) }), true),
 					h(P.Input, { key: 'model', value: row.model ?? '', placeholder: t('reviewerModel'), disabled, onChange: (event) => update({ model: event.target.value }) }),
 				);
 			}
@@ -833,7 +796,9 @@ window.__ModuleLoader__.load({
 				rows.length === 0 ? h('p', { className: 'dsh-review-hint' }, props.t('noReviewers')) : null,
 				rows.map((row, index) =>
 					h(ReviewerRow, {
-						key: `${row.id ?? 'row'}-${index}`,
+						// 用位置做 key：行只增删、不重排，而 id 是可编辑的——把 id 放进 key 会让
+						// 每敲一个字符就换 key、输入框被重新挂载而失焦。
+						key: index,
 						t: props.t,
 						row,
 						index,
@@ -978,7 +943,7 @@ window.__ModuleLoader__.load({
 				rows.length === 0 ? h('p', { className: 'dsh-review-hint' }, props.t('noModes')) : null,
 				rows.map((row, index) =>
 					h(ModeRow, {
-						key: `${row.name || 'mode'}-${index}`,
+						key: index, // 同上：模式名可编辑，不能进 key
 						t: props.t,
 						row,
 						index,
@@ -998,7 +963,8 @@ window.__ModuleLoader__.load({
 		/** 普通字段：按 control 选控件，全部写回同一个 staged 模型。 */
 		function Field(props) {
 			const { t, field, state, actions, disabled, catalog, reviewersText, modesText } = props;
-			const [labelKey, hintKey] = LABELS[field.path] ?? [field.path, undefined];
+			const labelKey = field.label ?? field.path;
+			const hintKey = field.hint;
 			const id = fieldId(field.path);
 			const overridden = state?.overridden === true;
 			const invalid = state?.invalid === true;
@@ -1122,6 +1088,7 @@ window.__ModuleLoader__.load({
 			const { t, field, state, actions, disabled, catalog, reviewersText } = props;
 			const [showJson, setShowJson] = useState(false);
 			const isReviewers = field.control === 'reviewers';
+			void field.label; // 标题由外层分区/子分组给出
 			const text = state?.text ?? '';
 			const groups = catalogGroups(catalog);
 			const providerOptions = groups.map((group) => ({ value: group.id, label: group.name }));
@@ -1648,7 +1615,16 @@ h5.dsh-review-subgroup-title {
 				shell: model.shell(),
 				fields: Object.fromEntries(FIELDS.map((field) => [field.path, model.field(field.path)])),
 			}));
-			ctx.effect(() => () => model.dispose(), 'dsh-review: form subscription');
+			ctx.effect(
+				() => () => {
+					// 先停掉待触发的自动保存，再释放模型：否则定时器会在 dispose 之后再写一次。
+					auto.disposed = true;
+					clearAutoTimer();
+					autoListeners.clear();
+					model.dispose();
+				},
+				'dsh-review: form subscription',
+			);
 			const modelActions = model.actions();
 
 			/**
@@ -1658,11 +1634,34 @@ h5.dsh-review-subgroup-title {
 			 * 很容易被忘掉。这里在它之上加一层防抖自动保存：每次编辑后 `delayMs` 毫秒内没有新编辑
 			 * 就落盘。安全性由宿主侧保证——写入会校验整份配置、失败就拒绝，所以半途的取值写不坏配置。
 			 *
-			 * 唯一需要特殊处理的是**冲突**：官方模型在首次暂存时记下 revision（`baseline ??=`），
-			 * 写入被拒后它不会刷新，于是后续保存会一直用过期 revision 被拒。所以失败时我们丢掉草稿
-			 * （这会清掉 baseline）再把同样的文本重新暂存一遍，从而拿到新 revision 重试一次。
+			 * 三个必须自己处理的坑：
+			 * 1. **冲突**：官方模型在首次暂存时记下 revision（`baseline ??=`），写入被拒后不会刷新，
+			 *    于是后续保存会一直用过期 revision 被拒。失败时丢掉草稿（清掉 baseline）再按原样
+			 *    重新暂存一遍，就能拿到新 revision 重试一次。
+			 * 2. **保存期间又编辑**：官方 `save()` 遇到 `saving` 会直接返回，那几个字会挂在草稿里。
+			 *    所以保存结束后若仍有草稿，要再排一轮。
+			 * 3. **离开页面**：卸载时 SettingsForm 会调 discard，必须先等在途保存结束、把剩下的写完，
+			 *    再丢草稿；否则最后几个字会丢。
+			 *
+			 * 另外保存可能抛异常（模型实现或传输层），所以整段包 try/catch：异常时如实报 failed
+			 * 并把重试标记复位，绝不能把状态永远卡在 saving。
 			 */
-			const auto = { delayMs: AUTO.delayMs, timer: undefined, retried: false, snapshot: { status: 'idle' } };
+			const auto = {
+				delayMs: AUTO.delayMs,
+				timer: undefined,
+				/** 用户这次会话里动过的字段 → 最后一次动作，冲突恢复时按它精确重放。 */
+				touched: new Map(),
+				/**
+				 * 保存期间到达的编辑，先存在这里。
+				 *
+				 * 官方模型的 `save()` 在成功后会 `staged.clear()`——把这次保存**期间**暂存的草稿
+				 * 一起清掉（它假设界面在 saving 时是禁用的）。禁用有个渲染窗口，快速输入仍可能撞上，
+				 * 所以这里把这类编辑缓冲下来，等这次保存结束后再暂存。
+				 */
+				pending: new Map(),
+				disposed: false,
+				snapshot: { status: 'idle' },
+			};
 			const autoListeners = new Set();
 			const publishAuto = (status) => {
 				auto.snapshot = { status };
@@ -1681,37 +1680,83 @@ h5.dsh-review-subgroup-title {
 					return () => autoListeners.delete(listener);
 				},
 			};
+			/** 把一次编辑动作落进模型（冲突重放与缓冲重放共用）。 */
+			const applyGesture = (field, gesture, text) => {
+				if (gesture === 'reset') modelActions.resetField(field);
+				else modelActions.edit(field, text ?? model.field(field)?.text ?? '');
+			};
+			/** 保存期间缓冲下来的编辑，现在补上。 */
+			const flushPendingEdits = () => {
+				if (auto.pending.size === 0) return;
+				const queued = [...auto.pending.entries()];
+				auto.pending.clear();
+				for (const [field, record] of queued) applyGesture(field, record.gesture, record.text);
+			};
 			const clearAutoTimer = () => {
 				if (auto.timer === undefined) return;
 				clearTimeout(auto.timer);
 				auto.timer = undefined;
 			};
-			const draftTexts = () => FIELDS.map((field) => ({ field: field.path, text: model.field(field.path)?.text ?? '' }));
+			/**
+			 * 冲突恢复：只重放用户真正动过的字段，并且保持原来的动作语义
+			 * （`edit` 写入 / `resetField` 清除）。全量重放会依赖模型内部比较才不至于写多余字段，
+			 * 没必要冒那个险。
+			 */
+			const replayTouched = () => {
+				const replay = [...auto.touched.entries()];
+				modelActions.discard();
+				for (const [field, gesture] of replay) applyGesture(field, gesture);
+			};
+			/**
+			 * 落一次盘，最多尝试两次：第一次被拒（冲突）或抛异常时，按原样重放一遍再试一次。
+			 * 两次都不成就如实返回 false——不无限重试。
+			 */
+			const saveWithRetry = async () => {
+				const attempt = async () => {
+					await model.save();
+					return !model.shell().failed;
+				};
+				for (let round = 0; round < 2; round += 1) {
+					let landed = false;
+					try {
+						landed = await attempt();
+					} catch {
+						landed = false; // 抛异常按「没落盘」处理，和冲突同一条恢复路径
+					}
+					if (landed) return true;
+					if (round === 0) replayTouched();
+				}
+				return false;
+			};
 			const writeNow = async () => {
 				clearAutoTimer();
-				const shell = model.shell();
-				if (!shell.writable) return publishAuto('idle');
-				if (shell.invalid) return publishAuto('blocked');
-				if (!shell.dirty) return publishAuto('saved');
-				publishAuto('saving');
-				await model.save();
-				if (model.shell().failed && !auto.retried) {
-					auto.retried = true;
-					const drafts = draftTexts();
-					modelActions.discard();
-					for (const draft of drafts) modelActions.edit(draft.field, draft.text);
-					await model.save();
+				if (auto.disposed) return;
+				try {
+					const shell = model.shell();
+					if (!shell.writable) return publishAuto('idle');
+					if (shell.invalid) return publishAuto('blocked');
+					if (!shell.dirty) {
+						auto.touched.clear();
+						return publishAuto('saved');
+					}
+					// 正在保存：这一轮没有意义，交给在途那次的收尾去补缓冲 + 重新排队。
+					if (shell.saving) return publishAuto('pending');
+					publishAuto('saving');
+					const landed = await saveWithRetry();
+					flushPendingEdits();
+					if (!landed) return publishAuto('failed');
+					const after = model.shell();
+					if (!after.dirty) auto.touched.clear();
+					if (after.invalid) return publishAuto('blocked');
+					if (after.dirty) return scheduleAutoSave();
+					return publishAuto('saved');
+				} catch {
+					// 只有我们自己的代码（取字段文本、重放）出错才会到这里
+					return publishAuto('failed');
 				}
-				auto.retried = false;
-				const after = model.shell();
-				// 保存期间又落了编辑（或这次 save 被模型的 `saving` 挡掉了）时还要再写一轮，
-				// 否则那几个字会一直挂在草稿里没人管。
-				if (after.failed) publishAuto('failed');
-				else if (after.invalid) publishAuto('blocked');
-				else if (after.dirty) scheduleAutoSave();
-				else publishAuto('saved');
 			};
 			const scheduleAutoSave = () => {
+				if (auto.disposed) return;
 				clearAutoTimer();
 				publishAuto('pending');
 				auto.timer = setTimeout(() => {
@@ -1720,21 +1765,45 @@ h5.dsh-review-subgroup-title {
 				}, auto.delayMs);
 				auto.timer?.unref?.();
 			};
-			// 保存前先落盘：离开页面时 SettingsForm 会调 onDiscard，不能把最后几个字丢掉。
-			// `model.save()` 在第一个 await 之前就把 ops 算好了，所以紧接着 discard 是安全的。
 			const actions = {
 				edit: (field, text) => {
+					auto.touched.set(field, 'edit');
+					// 保存期间先缓冲，避免被这次保存的 staged.clear() 顺手清掉。
+					if (model.shell().saving) {
+						auto.pending.set(field, { gesture: 'edit', text });
+						return publishAuto('pending');
+					}
 					modelActions.edit(field, text);
 					scheduleAutoSave();
 				},
 				resetField: (field) => {
+					auto.touched.set(field, 'reset');
+					if (model.shell().saving) {
+						auto.pending.set(field, { gesture: 'reset' });
+						return publishAuto('pending');
+					}
 					modelActions.resetField(field);
 					scheduleAutoSave();
 				},
 				save: () => void writeNow(),
+				/**
+				 * 离开页面：SettingsForm 卸载时会调这里。
+				 *
+				 * 不能直接 `writeNow()` + `discard()`——官方模型遇到「正在保存」会拒绝第二次
+				 * 保存，而 discard 会立刻清掉草稿，于是**保存期间敲进去的那几个字就丢了**。
+				 * 所以：等这次保存结束 → 再把剩下的写完 → 只有确实写完才丢弃草稿。
+				 */
 				discard: () => {
-					void writeNow();
-					modelActions.discard();
+					void (async () => {
+						const deadline = Date.now() + 3_000;
+						while (model.shell().saving && Date.now() < deadline) {
+							await new Promise((resolve) => setTimeout(resolve, 20));
+						}
+						flushPendingEdits();
+						await writeNow();
+						const after = model.shell();
+						if (!after.dirty && !after.failed) modelActions.discard();
+					})();
 				},
 			};
 
@@ -1859,7 +1928,6 @@ h5.dsh-review-subgroup-title {
 			newReviewerRow,
 			presetExecutable,
 			FIELDS,
-			BASIC_SECTIONS,
 			ADVANCED_GROUPS,
 			KINDS,
 			CLI_PRESETS,
