@@ -1703,9 +1703,15 @@ h5.dsh-review-subgroup-title {
 			 * 没必要冒那个险。
 			 */
 			const replayTouched = () => {
-				const replay = [...auto.touched.entries()];
+				// **先抓文本再丢草稿**：discard 会清掉暂存值，之后 `model.field(f).text` 读到的
+				// 是已落盘的旧值——用它重放等于把用户的编辑悄悄换成原值，还报告保存成功。
+				const replay = [...auto.touched.entries()].map(([field, gesture]) => ({
+					field,
+					gesture,
+					text: model.field(field)?.text ?? '',
+				}));
 				modelActions.discard();
-				for (const [field, gesture] of replay) applyGesture(field, gesture);
+				for (const { field, gesture, text } of replay) applyGesture(field, gesture, text);
 			};
 			/**
 			 * 落一次盘，最多尝试两次：第一次被拒（冲突）或抛异常时，按原样重放一遍再试一次。

@@ -987,6 +987,8 @@ async function loadClientBundle(options = {}) {
 			this.discardCalls = 0;
 			this.editLog = [];
 			this.resetLog = [];
+			/** 暂存草稿：field() 优先返回它，discard 与成功保存都会清掉（与官方一致）。 */
+			this.stagedText = new Map();
 			captured.models.push(this);
 		}
 		bind(project) {
@@ -999,23 +1001,31 @@ async function loadClientBundle(options = {}) {
 		field(name) {
 			const spec = this.specs.find((entry) => entry.field === name);
 			if (spec === undefined) return undefined;
+			// 有草稿就返回草稿文本（官方模型如此），否则返回已落盘的值。
+			if (this.stagedText.has(name)) {
+				const staged = this.stagedText.get(name);
+				return { text: staged ?? '', overridden: staged !== null, invalid: false };
+			}
 			const value = this.scope.getSnapshot().value ?? {};
 			const read = (path) => path.split('.').reduce((acc, key) => (acc === undefined || acc === null ? undefined : acc[key]), value);
 			return { text: spec.format(read(name)), overridden: false, invalid: false };
 		}
 		actions() {
 			return {
-				edit: (field) => {
+				edit: (field, text) => {
 					this.dirty = true;
-					this.editLog.push(field);
+					this.stagedText.set(field, text);
+					this.editLog.push([field, text]);
 				},
 				resetField: (field) => {
 					this.dirty = true;
+					this.stagedText.set(field, null); // null = 清除草稿（回落到 base）
 					this.resetLog.push(field);
 				},
 				save: () => this.save(),
 				discard: () => {
 					this.discardCalls += 1;
+					this.stagedText.clear();
 					this.dirty = false;
 					this.failed = false;
 				},
@@ -1034,6 +1044,8 @@ async function loadClientBundle(options = {}) {
 				this.failed = true; // 失败时保留草稿（dirty 仍为 true）
 				return;
 			}
+			// 成功保存会清掉草稿（官方模型是 staged.clear()），失败则保留草稿供重试。
+			this.stagedText.clear();
 			this.dirty = false;
 			this.failed = false;
 		}
@@ -1565,7 +1577,10 @@ console.log('\nJ2. 自动保存');
 	const face = captured.registrations[0].options.inject();
 	face.edit('language', 'en');
 	await new Promise((resolve) => setTimeout(resolve, 30));
-	check('J2 冲突恢复只重放动过的字段', [...new Set(model.editLog)].join(',') === 'language', JSON.stringify(model.editLog));
+	const replayed = model.editLog.map(([field, text]) => `${field}=${text}`);
+	check('J2 冲突恢复只重放动过的字段', [...new Set(model.editLog.map(([field]) => field))].join(',') === 'language', JSON.stringify(model.editLog));
+	// 关键：重放的必须是用户敲进去的值（'en'），不是取回草稿后读到的旧值（假宿主里是 'zh'）
+	check('J2 冲突恢复重放的是用户的编辑值', replayed.every((entry) => entry === 'language=en'), JSON.stringify(replayed));
 	check('J2 冲突恢复没有重放整表', model.editLog.length <= 3, String(model.editLog.length));
 	I.AUTO.delayMs = 500;
 }
