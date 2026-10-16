@@ -54,6 +54,10 @@ window.__ModuleLoader__.load({
 			activeDisabledNote: '另有 {count} 个评审者被「启用」开关关掉了，不在这里列出。',
 			activeUnknownNote: '以下 id 在配置里被选中，但已不在评审者定义里（可能是改过 id）：',
 			activeTargetCli: 'CLI',
+			activeUnknownMeta: 'not in the reviewer definitions',
+			defaultModeNone: 'No mode',
+			activeUnknownMeta: '不在评审者定义里',
+			defaultModeNone: '不套模式',
 			defaultReviewers: '启用的评审者',
 			defaultReviewersHint: '勾上的会被默认使用。',
 			groupBehavior: '评审行为',
@@ -339,12 +343,26 @@ window.__ModuleLoader__.load({
 			return splitList(providersText).length > 0 || splitList(includeText).length > 0;
 		}
 
-		/** 一行评审者「指向什么」的一句话摘要（顶部列表用）。 */
-		function reviewerTarget(row) {
+		/** 一行评审者「指向什么」的完整描述（tooltip 用，可能很长）。 */
+		function reviewerTargetFull(row) {
 			const kind = row.kind ?? 'cli';
 			if (kind === 'llm') return `${row.provider ?? '?'}/${row.model ?? '?'}`;
 			if (kind === 'subagent') return `${row.provider ?? 'spawn'}${typeof row.agentModel === 'string' && row.agentModel.length > 0 ? ` · ${row.agentModel}` : ''}`;
 			return row.executable ?? row.preset ?? 'cli';
+		}
+
+		/**
+		 * 顶部列表里的短摘要：CLI 只留可执行文件名。
+		 *
+		 * 之前直接显示 `executable` 的绝对路径（`/Users/…/@openai/codex/bin/codex.js`），
+		 * 一行被撑满、还把开关和名字挤到左边——列表要能一眼扫过去，细节交给 tooltip。
+		 */
+		function reviewerTarget(row) {
+			const kind = row.kind ?? 'cli';
+			if (kind === 'llm' || kind === 'subagent') return reviewerTargetFull(row);
+			const raw = reviewerTargetFull(row);
+			const base = raw.split('/').filter((part) => part.length > 0).pop() ?? raw;
+			return base;
 		}
 
 		/**
@@ -360,9 +378,12 @@ window.__ModuleLoader__.load({
 				label: typeof row.label === 'string' && row.label.trim().length > 0 ? row.label : row.id,
 				kind: row.kind ?? 'cli',
 				target: reviewerTarget(row),
+				title: reviewerTargetFull(row),
 				checked: selected.includes(row.id),
 			}));
-			const unknown = selected.filter((id) => !choices.some((choice) => choice.id === id)).map((id) => ({ id, label: id, kind: 'unknown', target: '', checked: true }));
+			const unknown = selected
+				.filter((id) => !choices.some((choice) => choice.id === id))
+				.map((id) => ({ id, label: '', kind: 'unknown', target: '', title: '', checked: true }));
 			return {
 				choices,
 				unknown,
@@ -718,17 +739,30 @@ window.__ModuleLoader__.load({
 						disabled,
 						onChange: (value) => update({ preset: value, executable: value === 'custom' ? row.executable : presetExecutable(value) }),
 					}),
-					h(P.Input, { key: 'executable', id: `reviewer-${index}-executable`, value: row.executable ?? '', placeholder: 'codex', disabled, onChange: (event) => update({ executable: event.target.value }) }),
+					h(
+						'div',
+						{ key: 'executable', className: 'dsh-review-field dsh-review-field--wide' },
+						h('span', { className: 'dsh-review-label' }, t('reviewerExecutable')),
+						h(P.Input, { id: `reviewer-${index}-executable`, value: row.executable ?? '', placeholder: 'codex', disabled, onChange: (event) => update({ executable: event.target.value }) }),
+					),
 					h(P.Input, { key: 'model', value: row.model ?? '', placeholder: t('reviewerModel'), disabled, onChange: (event) => update({ model: event.target.value }) }),
 				);
 			}
 			return h(
 				'div',
 				{ className: 'dsh-review-card' },
+				// head 只放「身份 + 开关 + 删除」；类型另起一行，窄面板下也不会挤成一团。
 				h(
 					'div',
 					{ className: 'dsh-review-card-head' },
 					h(P.Input, { id: `reviewer-${index}-id`, value: row.id ?? '', placeholder: t('reviewerId'), disabled, onChange: (event) => update({ id: event.target.value }) }),
+					h(P.Switch, { checked: row.enabled !== false, label: t('reviewerEnabled'), disabled, onChange: (next) => update({ enabled: next }) }),
+					h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: () => props.onRemove() }, t('remove')),
+				),
+				h(
+					'div',
+					{ className: 'dsh-review-card-kind' },
+					h('span', { className: 'dsh-review-label' }, t('reviewerKind')),
 					h(P.SegmentedControl, {
 						id: `reviewer-${index}-kind`,
 						label: '',
@@ -741,11 +775,14 @@ window.__ModuleLoader__.load({
 						],
 						onChange: (value) => update({ kind: value }),
 					}),
-					h(P.Switch, { checked: row.enabled !== false, label: t('reviewerEnabled'), disabled, onChange: (next) => update({ enabled: next }) }),
-					h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: () => props.onRemove() }, t('remove')),
 				),
 				h('div', { className: 'dsh-review-card-grid' }, fields),
-				h(P.Input, { value: row.label ?? '', placeholder: t('reviewerLabel'), disabled, onChange: (event) => update({ label: event.target.value }) }),
+				h(
+					'div',
+					{ className: 'dsh-review-field' },
+					h('span', { className: 'dsh-review-label' }, t('reviewerLabel')),
+					h(P.Input, { value: row.label ?? '', placeholder: '', disabled, onChange: (event) => update({ label: event.target.value }) }),
+				),
 			);
 		}
 
@@ -863,14 +900,26 @@ window.__ModuleLoader__.load({
 							onChange: (value) => replace({ ...body, synthesizeReviewer: value }),
 						}),
 					),
-					h(P.Input, {
-						value: body.minChangedLines === undefined ? '' : String(body.minChangedLines),
-						placeholder: t('modeMinLines'),
-						disabled,
-						onChange: (event) => replace({ ...body, minChangedLines: event.target.value === '' ? undefined : Number(event.target.value) }),
-					}),
+					inline(
+						'minChangedLines',
+						t('modeMinLines'),
+						h(P.Input, {
+							value: body.minChangedLines === undefined ? '' : String(body.minChangedLines),
+							placeholder: '',
+							disabled,
+							onChange: (event) => replace({ ...body, minChangedLines: event.target.value === '' ? undefined : Number(event.target.value) }),
+						}),
+					),
 				),
-				h(P.Input, { value: body.prompt ?? '', placeholder: t('modePrompt'), disabled, onChange: (event) => update({ prompt: event.target.value }) }),
+				h('textarea', {
+					className: 'dsh-review-textarea',
+					value: body.prompt ?? '',
+					placeholder: t('modePrompt'),
+					disabled,
+					spellCheck: false,
+					rows: 2,
+					onChange: (event) => update({ prompt: event.target.value }),
+				}),
 				h(P.Input, { value: body.description ?? '', placeholder: t('modeDescription'), disabled, onChange: (event) => update({ description: event.target.value }) }),
 			);
 		}
@@ -965,9 +1014,9 @@ window.__ModuleLoader__.load({
 					h(Dropdown, {
 						id,
 						value: text,
-						options: [{ value: '', label: '—' }, ...names.map((name) => ({ value: name, label: name }))],
+						options: [{ value: '', label: t('defaultModeNone') }, ...names.map((name) => ({ value: name, label: name }))],
 						disabled,
-						placeholder: '—',
+						placeholder: t('defaultModeNone'),
 						onChange: (next) => actions.edit(field.path, next),
 					}),
 				);
@@ -1051,10 +1100,10 @@ window.__ModuleLoader__.load({
 			return h(
 				'div',
 				{ className: 'dsh-review-structured' },
+				// 外层分区/子分组已经给了标题，这里只放动作（原来 modes 那里误显示成 defaultMode）。
 				h(
 					'div',
 					{ className: 'dsh-review-structured-head' },
-					h('span', { className: 'dsh-review-label' }, t(isReviewers ? 'groupReviewers' : 'defaultMode')),
 					state?.overridden ? h('span', { className: 'dsh-review-badge' }, t('overridden')) : null,
 					state?.overridden ? h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: () => actions.resetField(field.path) }, t('reset')) : null,
 					h(P.Button, { variant: 'ghost', size: 'sm', onClick: () => setShowJson(!showJson) }, t(showJson ? 'hideJson' : 'showJson')),
@@ -1067,23 +1116,302 @@ window.__ModuleLoader__.load({
 						: h(ModesEditor, { t, rows, reviewerOptions: reviewerIds, llmOptions: llmIds, disabled, onChange }),
 				),
 				showJson
-					? h(P.SettingsValueField, {
-							id: fieldId(field.path),
-							label: t('showJson'),
-							hint: t('jsonHint'),
-							invalidLabel: t(isReviewers ? 'invalidReviewer' : 'invalidMode'),
-							overriddenLabel: t('overridden'),
-							resetLabel: t('reset'),
-							disabled,
-							text,
-							overridden: state?.overridden === true,
-							invalid: state?.invalid === true,
-							onEdit: (value) => actions.edit(field.path, value),
-							onReset: () => actions.resetField(field.path),
-						})
+					? h(
+							FieldShell,
+							{
+								id: fieldId(field.path),
+								label: t('showJson'),
+								hint: t('jsonHint'),
+								overridden: state?.overridden === true,
+								overriddenLabel: t('overridden'),
+								resetLabel: t('reset'),
+								invalid: state?.invalid === true,
+								invalidLabel: t(isReviewers ? 'invalidReviewer' : 'invalidMode'),
+								disabled,
+								onReset: () => actions.resetField(field.path),
+							},
+							h('textarea', {
+								id: fieldId(field.path),
+								className: 'dsh-review-textarea dsh-review-textarea--mono',
+								value: text,
+								disabled,
+								spellCheck: false,
+								rows: 8,
+								onChange: (event) => actions.edit(field.path, event.target.value),
+							}),
+						)
 					: null,
 				state?.invalid ? h('p', { className: 'dsh-review-invalid' }, t(isReviewers ? 'invalidReviewer' : 'invalidMode')) : null,
 			);
+		}
+
+
+		/**
+		 * 页面样式。
+		 *
+		 * 宿主不会替第三方页面排版，class 名没有配套 CSS 就是「一堆浏览器默认样式」——
+		 * 所以这里自己注入一份，并且**刻意沿用官方 settings-form 的度量与设计变量**
+		 * （字号 13/12、0.5px 分隔线、`--dsw-radius-md`、`--dsw-alias-label-*`），
+		 * 让这一页看起来和官方设置页是同一套东西，亮暗主题也自动跟随。
+		 */
+		const STYLES = `
+.dsh-review-group { margin: 0; padding: 0; }
+.dsh-review-group + .dsh-review-group {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+}
+h4.dsh-review-group-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+h5.dsh-review-subgroup-title {
+  margin: 0 0 2px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-review-subgroup { margin-top: 16px; }
+.dsh-review-group-head {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--dsw-radius-sm);
+}
+.dsh-review-group-head:hover .dsh-review-group-title { color: var(--dsw-alias-state-business-primary); }
+.dsh-review-group-head:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+.dsh-review-caret {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 0 2px;
+  border-right: 1.5px solid var(--dsw-alias-label-tertiary);
+  border-bottom: 1.5px solid var(--dsw-alias-label-tertiary);
+  transform: rotate(-45deg);
+  transform-origin: 60% 60%;
+}
+.dsh-review-caret.is-open { transform: rotate(45deg); }
+.dsh-review-group-action {
+  margin-left: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-review-group-body > .dsh-review-subgroup:first-child { margin-top: 12px; }
+
+/* 顶部「启用的评审者」：一张有分隔线的卡片列表 */
+.dsh-review-active-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+  border-radius: var(--dsw-radius-md);
+  overflow: hidden;
+}
+.dsh-review-active-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 14px;
+}
+.dsh-review-active-item + .dsh-review-active-item {
+  border-top: 0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+}
+.dsh-review-active-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.dsh-review-active-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-review-active-id {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-review-active-meta {
+  flex: 0 1 auto;
+  max-width: 46%;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 通用字段：与官方 settings-form/fields 同一套度量 */
+.dsh-review-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 0;
+}
+/* 输入框要占满整格；其余控件（开关、分段、下拉、复选组）保持自然宽度左对齐 */
+.dsh-review-field > input,
+.dsh-review-card-grid > input { width: 100%; box-sizing: border-box; }
+.dsh-review-field + .dsh-review-field {
+  border-top: 0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+}
+.dsh-review-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dsh-review-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-review-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-4);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-review-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-review-invalid {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-state-error-primary);
+}
+.dsh-review-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+/* 结构化编辑器：一行一块卡片 */
+.dsh-review-editor { display: flex; flex-direction: column; }
+.dsh-review-editor > button { align-self: flex-start; margin-top: 12px; }
+.dsh-review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+  border-radius: var(--dsw-radius-md);
+}
+.dsh-review-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dsh-review-card-head > input { flex: 1 1 180px; min-width: 0; }
+.dsh-review-card-kind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dsh-review-card-kind > .dsh-review-label { flex: none; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.dsh-review-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  gap: 4px 16px;
+}
+.dsh-review-card-grid > .dsh-review-field { padding: 6px 0; border-top: 0; }
+.dsh-review-field--wide { grid-column: 1 / -1; }
+.dsh-review-structured-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 0 2px;
+}
+.dsh-review-structured-body {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4px;
+}
+.dsh-review-textarea {
+  width: 100%;
+  min-height: 88px;
+  padding: 8px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l4, rgba(0, 0, 0, 0.16));
+  border-radius: var(--dsw-radius-md, 12px);
+  background: var(--dsw-alias-bg-layer-3, transparent);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary, inherit);
+  resize: vertical;
+  box-sizing: border-box;
+}
+.dsh-review-textarea:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary, #4d6bfe);
+}
+.dsh-review-textarea--mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.dsh-review-textarea:disabled { color: var(--dsw-alias-label-tertiary, inherit); }
+`.trim();
+
+		/** 注入一次样式；已注入过（HMR/重挂载）就不再重复插标签。 */
+		function injectStyles() {
+			if (typeof document === 'undefined' || document.head === undefined) return () => {};
+			const tagId = '@deepseek-ai/dsh-review/client.css';
+			if (document.querySelector(`style[data-plugin-css="${tagId}"]`) !== null) return () => {};
+			const tag = document.createElement('style');
+			tag.dataset.plugin = 'dsh-review';
+			tag.dataset.pluginCss = tagId;
+			tag.textContent = STYLES;
+			document.head.appendChild(tag);
+			return () => {
+				/* 保持与官方页面一致：样式标签留在文档里，靠 dataset 标记去重 */
+			};
 		}
 
 		/** 可折叠分区：高级配置默认收起。 */
@@ -1100,7 +1428,7 @@ window.__ModuleLoader__.load({
 						'aria-expanded': props.open,
 						onClick: props.onToggle,
 					},
-					h('span', { className: 'dsh-review-caret' }, props.open ? '▾' : '▸'),
+					h('span', { className: `dsh-review-caret${props.open ? ' is-open' : ''}`, 'aria-hidden': 'true' }),
 					h('span', { className: 'dsh-review-group-title' }, props.title),
 					h('span', { className: 'dsh-review-group-action' }, props.open ? props.collapseLabel : props.expandLabel),
 				),
@@ -1135,16 +1463,20 @@ window.__ModuleLoader__.load({
 									h(
 										'span',
 										{ className: 'dsh-review-active-text' },
-										h('span', { className: 'dsh-review-active-name' }, row.label),
+										row.label.length > 0 && row.label !== row.id ? h('span', { className: 'dsh-review-active-name' }, row.label) : null,
 										h('code', { className: 'dsh-review-active-id' }, row.id),
-										h('span', { className: 'dsh-review-active-meta' }, `${row.kind}${row.target.length > 0 ? ` · ${row.target}` : ''}`),
+										h(
+											'span',
+											{ className: 'dsh-review-active-meta', title: row.title },
+											row.kind === 'unknown' ? t('activeUnknownMeta') : `${row.kind} · ${row.target}`,
+										),
 									),
 								),
 							),
 						),
 				info.selectedCount === 0 && rows.length > 0 ? h('p', { className: 'dsh-review-invalid' }, t('activeNoneSelected')) : null,
 				info.disabledCount > 0 ? h('p', { className: 'dsh-review-hint' }, t('activeDisabledNote').replace('{count}', String(info.disabledCount))) : null,
-				info.unknown.length > 0 ? h('p', { className: 'dsh-review-hint' }, `${t('activeUnknownNote')}${info.unknown.map((row) => row.id).join('、')}`) : null,
+				info.unknown.length > 0 ? h('p', { className: 'dsh-review-hint' }, `${t('activeUnknownNote')} ${info.unknown.map((row) => row.id).join('、')}`) : null,
 			);
 		}
 
@@ -1234,6 +1566,7 @@ window.__ModuleLoader__.load({
 		function apply(ctx) {
 			const t = ctx.locale.bind(NS);
 			ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-review: dictionaries');
+			ctx.effect(() => injectStyles(), 'dsh-review: styles');
 
 			// 表单模型：staged 编辑 + 一次原子写入，和官方设置页共用同一套机制。
 			const model = new P.SettingsFormModel(
@@ -1356,7 +1689,10 @@ window.__ModuleLoader__.load({
 			serializeModes,
 			cleanupModeBody,
 			effectiveDiscoverEnabled,
+			STYLES,
+			injectStyles,
 			reviewerTarget,
+			reviewerTargetFull,
 			reviewerChoices,
 			toggleSelection,
 			catalogGroups,

@@ -1083,6 +1083,44 @@ function findAll(node, predicate) {
 	check('J 导出 inject（slots/locale/configForms）', JSON.stringify(mod.inject) === JSON.stringify(['slots', 'locale', 'configForms']), JSON.stringify(mod.inject));
 	check('J 导出 apply 与自测内部件', typeof mod.apply === 'function' && typeof I === 'object');
 
+	// ── 样式：宿主不会替第三方页面排版，class 没有配套 CSS 就会退回浏览器默认样式 ──
+	{
+		// 只扫 className（元素 id 不需要样式规则）。
+		const classes = [...new Set([...readFileSync(new URL('./client/client.js', import.meta.url), 'utf8').matchAll(/className: '(dsh-review-[a-z0-9-]+)'/g)].map((match) => match[1]))].sort();
+		check('J 代码里确实用到了一批自有 class', classes.length >= 25, String(classes.length));
+		const unstyled = classes.filter((name) => !I.STYLES.includes(`.${name}`));
+		check('J 每个自有 class 都有样式', unstyled.length === 0, unstyled.join(', '));
+		// 与官方 settings-form 同一套设计变量与度量，亮暗主题自动跟随
+		check('J 样式沿用宿主设计变量', ['--dsw-alias-label-primary', '--dsw-alias-label-tertiary', '--dsw-alias-border-l2', '--dsw-radius-md', '--dsw-focus-ring-width'].every((token) => I.STYLES.includes(token)));
+		check('J 样式与官方度量一致', I.STYLES.includes('font-size: 13px') && I.STYLES.includes('font-size: 12px') && I.STYLES.includes('0.5px solid'));
+		// 折叠头是原生 button：必须清掉浏览器默认样式，否则一眼就是「没排版」
+		check('J 折叠头清掉了默认按钮样式', I.STYLES.includes('.dsh-review-group-head {') && /appearance: none/.test(I.STYLES) && /border: 0/.test(I.STYLES));
+		check('J 列表去掉了默认项目符号与缩进', /list-style: none/.test(I.STYLES) && /padding: 0/.test(I.STYLES));
+	}
+
+	// ── 样式注入：有 document 时插一次、重复调用不重复插 ──
+	{
+		const tags = [];
+		const head = [];
+		globalThis.document = {
+			head: { appendChild: (tag) => head.push(tag) },
+			querySelector: (selector) => head.find((tag) => selector.includes(tag.dataset.pluginCss)) ?? null,
+			createElement: () => {
+				const tag = { dataset: {}, textContent: '' };
+				tags.push(tag);
+				return tag;
+			},
+		};
+		const disposeA = I.injectStyles();
+		check('J 注入样式标签', tags.length === 1 && tags[0].textContent === I.STYLES && tags[0].dataset.plugin === 'dsh-review', String(tags.length));
+		I.injectStyles();
+		check('J 重复注入不重复插标签', tags.length === 1, String(tags.length));
+		disposeA();
+		check('J 卸载时保留标签（与官方页面一致，靠 dataset 去重）', head.length === 1);
+		delete globalThis.document;
+		check('J 没有 document 时安全降级', typeof I.injectStyles() === 'function');
+	}
+
 	// ── 纯逻辑：文本 ↔ 表格（结构化编辑器与原始 JSON 共用同一份值）──
 	check('J splitList 支持逗号/换行/空白', JSON.stringify(I.splitList(' a , \n b ,, c ')) === JSON.stringify(['a', 'b', 'c']));
 	check('J parseJson 失败给兜底', JSON.stringify(I.parseJson('{bad', ['x'])) === JSON.stringify(['x']) && JSON.stringify(I.parseJson('', ['x'])) === JSON.stringify(['x']));
@@ -1203,8 +1241,11 @@ function findAll(node, predicate) {
 	const view = { shell: model.shell(), fields: Object.fromEntries(model.specs.map((entry) => [entry.field, model.field(entry.field)])) };
 	const element = captured.registrations[0].render({ view: 'page', t: (key) => key, ...face, useReviewConfigForm: (selector) => selector(view), useReviewCatalog: (selector) => selector(face.hooks.reviewCatalog.getSnapshot()) });
 	const textFields = I.FIELDS.filter((field) => field.control === 'text' || field.control === 'number').length;
-	// forceInitial 也把「显示原始 JSON」的折叠打开了，所以是 textFields + 2 个 JSON 兜底框。
-	check('J 展开后高级字段出现', findAll(element, (node) => node.type === 'SettingsValueField').length === textFields + 2, `${findAll(element, (node) => node.type === 'SettingsValueField').length} vs ${textFields + 2}`);
+	check('J 展开后高级字段出现', findAll(element, (node) => node.type === 'SettingsValueField').length === textFields, `${findAll(element, (node) => node.type === 'SettingsValueField').length} vs ${textFields}`);
+	// JSON 兜底与模式提示词都是多行文本框（单行输入框编辑 JSON 太难用）。
+	const textareas = findAll(element, (node) => node.type === 'textarea');
+	check('J JSON 兜底用多行文本框', textareas.filter((node) => String(node.props.className).includes('dsh-review-textarea--mono')).length === 2, String(textareas.length));
+	check('J 模式提示词用多行文本框', textareas.some((node) => node.props.rows === 2));
 	check('J 展开后有四个高级子分组', findAll(element, (node) => node.props?.className === 'dsh-review-subgroup').length === I.ADVANCED_GROUPS.length, String(findAll(element, (node) => node.props?.className === 'dsh-review-subgroup').length));
 	const switches = findAll(element, (node) => node.type === 'Switch');
 	// 4 个布尔字段 + 顶部列表 2 个 + 评审者行内 2 个 + 模式的合并开关 1 个
