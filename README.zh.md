@@ -13,10 +13,9 @@
 
 ## 它能做什么
 
-- **三种评审者。** `codex` / `claude` / `gemini` / `opencode` / `cursor`，或你自己拼命令行的
-  任意 CLI；DSH provider 配置里的任意模型；或者一个能读仓库的 DSH 子智能体。
-- **多个评审者，一份报告。** 并行跑，结论合并；每个评审者一节，可选再走一遍汇总去重、
-  标注共识。
+- **两种评审者，都是真智能体。** `codex` / `claude` / `gemini` / `opencode` / `cursor`，或你
+  自己拼命令行的任意 CLI；或者一个跑 DSH 配置里模型的子智能体。
+- **多个评审者，一份报告。** 并行跑；每个评审者一节，按你勾选的顺序排列。
 - **评审模式。** 强度与提示词起个名字（`quick`、`balanced`、`deep`……）配一次就能复用，
   不必每次重写评审要求。
 - **在 GUI 里配置，而且自动保存。** 勾选要用的评审者，其余都收在「高级配置」里；停止输入约半秒
@@ -40,8 +39,8 @@ dsh plugin --profile web add ~/code/github/dsh-review     # web 换成你的 pro
 
 ```js
 review()                                          // 用你启用的评审者，评审未提交的改动
-review({ reviewers: ["codex", "qwen"] })          // 这次指定评审者
-review({ mode: "deep" })                          // 深度模式：多个评审者 + 汇总
+review({ reviewers: ["codex", "deep-dive"] })     // 这次指定评审者
+review({ mode: "deep" })                          // 深度模式：多个评审者
 review({ base: "main" })                          // 工作区相对某个分支的改动
 review({ commit: "abc1234" })                     // 某个提交引入的改动
 review({ instructions: "只看并发与错误处理" })
@@ -58,14 +57,15 @@ review({ instructions: "只看并发与错误处理" })
 | 类型 | 跑什么 | 自己会读代码吗 | 依赖 |
 | --- | --- | --- | --- |
 | `cli` | 你已经信得过的编码智能体 | 看预设（codex 会自己读仓库） | 本机装了那个 CLI |
-| `llm` | DSH provider 配置里的模型 | 不会——diff 直接发给它 | 配好的 provider + 模型 |
 | `subagent` | DSH 子智能体 | 会，它有工具 | 一个 subagent provider |
 
 CLI 预设：`codex`、`claude`、`gemini`、`opencode`、`cursor`，或 `custom` 自定义命令模板。
 
-选的时候有两点值得知道：`subagent` 不写 `agentModel` 就会继承父会话的模型，所以它**不自动等于**
-「第二意见」——想要独立意见就显式指定模型；而 `llm` 是唯一能用**别的模型**、又不给它工具的类型，
-模式的 `synthesize` 汇总也依赖它（合并结论需要一次不带工具的模型调用）。
+有一点值得知道：`subagent` 不写 `agentModel` 就会继承父会话的模型，所以它**不自动等于**「第二
+意见」——想要独立意见就显式指定模型。
+
+这里刻意**没有**「把 diff 丢给一个裸模型」这种类型：能自己打开仓库的评审者，比只看到手头材料的
+更有价值。
 
 ```yaml
 - id: review
@@ -74,26 +74,17 @@ CLI 预设：`codex`、`claude`、`gemini`、`opencode`、`cursor`，或 `custom
     agents:
       - preset: codex
         model: gpt-5.6-sol
-    models:
-      - provider: bailian          # 你 DSH 配置里的任意 provider
-        model: qwen3.8-max
+      - preset: claude
+    reviewers:
+      - id: deep-dive
+        kind: subagent
+        provider: spawn
+        agentProvider: bailian      # 你 DSH 配置里的任意 provider
+        agentModel: deepseek-v4.1-flash
 ```
 
-`llm` 类型走的是 DSH 自己的 LLM 服务，所以 provider、密钥、上下文窗口、是否支持图片，
-全都来自你的 DSH 配置——这里不复制任何一份。任何已注册的模型还可以直接指名，不必先写进配置：
-
-```js
-review({ reviewers: ["bailian/kimi-k3"] })
-```
-
-想让某个 provider 的模型变成一等公民式的评审者（GUI 里能勾、模式里能用），打开模型发现：
-
-```yaml
-config:
-  discover:
-    providers: [ bailian ]
-    exclude: [ "*embedding*", "*rerank*" ]
-```
+子智能体的模型同样来自你的 DSH 配置（provider、密钥、上下文窗口），GUI 里直接列出已注册的那些，
+插件里不复制任何一份。
 
 ## 评审模式
 
@@ -104,7 +95,6 @@ config:
 | `strength` | `light` / `standard` / `deep`——内置的评审措辞 |
 | `prompt` | 这个模式自己的评审指令 |
 | `reviewers` | 这个模式用哪些评审者 |
-| `synthesize` | 把各评审者的结论合并去重 |
 | `when` | `always` / `complex` / `never`——给智能体看的评审策略 |
 
 ```yaml
@@ -113,11 +103,10 @@ config:
   modes:
     balanced:
       strength: standard
-      reviewers: [ codex, qwen3.8-max ]
+      reviewers: [ codex ]
     deep:
       strength: deep
-      reviewers: [ codex, qwen3.8-max, glm-5.3 ]
-      synthesize: true
+      reviewers: [ codex, deep-dive ]
 ```
 
 一个模式都不配时，插件不追加任何约束——你继续用自己的提示词管智能体就行。`when` 只有在同时
@@ -133,9 +122,8 @@ config:
 | `defaultMode` | 不设 | 调用没给 `mode` 时套用的模式 |
 | `language` | `auto` | `zh` / `en` / `auto` 报告语言（`auto` 跟随你的指令） |
 | `injectPolicy` | `false` | 把各模式的 `when` 规则写进系统提示词 |
-| `agents` / `models` / `reviewers` | `[]` | 定义 CLI、模型、子智能体三类评审者 |
+| `agents` / `reviewers` | `[]` | 定义 CLI 与子智能体评审者（`agents` 是预设简写，`reviewers` 是完整写法） |
 | `modes` | `{}` | 命名评审模式 |
-| `discover` | 关闭 | 直接用 DSH 里的模型，不必逐个列出 |
 | `waitMs` | `120000` | 调用阻塞多久后交回 job id；`0` = 立即交回 |
 | `hardTimeoutMs` | `0` | 墙钟上限；`0` = 不限制——什么时候停由你决定 |
 | `maxResultChars` | `80000` | 报告上限；超出会截断并给出完整报告路径 |

@@ -14,12 +14,11 @@ read one merged report.
 
 ## What it gives you
 
-- **Three kinds of reviewer.** `codex` / `claude` / `gemini` / `opencode` / `cursor` / any CLI
-  you template yourself; any model from your DSH provider config; or a DSH subagent that can
-  read the repository.
-- **Several reviewers, one report.** They run in parallel and their findings are merged, with
-  per-reviewer sections and (optionally) a synthesis pass that de-duplicates and marks
-  consensus.
+- **Two kinds of reviewer, both real agents.** `codex` / `claude` / `gemini` / `opencode` /
+  `cursor` / any CLI you template yourself, or a DSH subagent running a model from your DSH
+  configuration.
+- **Several reviewers, one report.** They run in parallel; each gets its own section, in the
+  order they were selected.
 - **Review modes.** Name a strength and a prompt once (`quick`, `balanced`, `deep`, …) and reuse
   it, instead of retyping review instructions every time.
 - **Configured in the GUI, and saved for you.** Tick the reviewers you want; everything else
@@ -46,8 +45,8 @@ Restart the host afterwards. Updating works the same way: `git pull`, then resta
 
 ```js
 review()                                          // the reviewers you enabled, uncommitted changes
-review({ reviewers: ["codex", "qwen"] })          // pick reviewers for this call
-review({ mode: "deep" })                          // deep strength, several reviewers, synthesized
+review({ reviewers: ["codex", "deep-dive"] })     // pick reviewers for this call
+review({ mode: "deep" })                          // deep strength, several reviewers
 review({ base: "main" })                          // working tree vs a branch
 review({ commit: "abc1234" })                     // one commit
 review({ instructions: "only concurrency and error handling" })
@@ -65,17 +64,17 @@ rather than quietly running everything.
 | Kind | What runs | Reads the code itself | Needs |
 | --- | --- | --- | --- |
 | `cli` | a coding agent you already trust | depends on the preset (codex reads the repo) | that CLI installed |
-| `llm` | a model from your DSH provider config | no — the diff is sent to it | a configured provider + model |
 | `subagent` | a DSH child agent | yes, it has tools | a subagent provider |
 
 CLI presets: `codex`, `claude`, `gemini`, `opencode`, `cursor`, or `custom` with your own
 command template.
 
-Two things worth knowing when choosing: a `subagent` inherits the parent session's model unless
-you set `agentModel`, so it is **not** automatically a second opinion — name the model explicitly
-if you want one. And `llm` is the only kind that reaches a *different* model without handing it
-tools; it is also what a mode's `synthesize` step needs, since merging reports is one tool-free
-model call.
+One thing worth knowing: a `subagent` inherits the parent session's model unless you set
+`agentModel`, so it is **not** automatically a second opinion — name the model explicitly if you
+want one.
+
+There is deliberately no "send the diff to a bare model" kind: a reviewer that can open the
+repository itself is worth more than one that only sees what it was handed.
 
 ```yaml
 - id: review
@@ -84,28 +83,17 @@ model call.
     agents:
       - preset: codex
         model: gpt-5.6-sol
-    models:
-      - provider: bailian          # any provider from your DSH config
-        model: qwen3.8-max
+      - preset: claude
+    reviewers:
+      - id: deep-dive
+        kind: subagent
+        provider: spawn
+        agentProvider: bailian      # any provider from your DSH config
+        agentModel: deepseek-v4.1-flash
 ```
 
-The `llm` kind reaches models through DSH's own LLM service, so provider, key, context window
-and image support all come from your DSH configuration — nothing is duplicated here. Any
-registered model can also be named directly, without listing it first:
-
-```js
-review({ reviewers: ["bailian/kimi-k3"] })
-```
-
-To make a provider's models first-class reviewers (selectable in the GUI, usable in modes),
-turn on discovery:
-
-```yaml
-config:
-  discover:
-    providers: [ bailian ]
-    exclude: [ "*embedding*", "*rerank*" ]
-```
+A subagent's model comes from your DSH configuration (provider, key, context window), and the
+GUI offers the registered ones as a list — nothing is duplicated in this plugin.
 
 ## Review modes
 
@@ -116,7 +104,6 @@ A mode bundles how hard to look, what to say, and who to use.
 | `strength` | `light` / `standard` / `deep` — built-in review framing |
 | `prompt` | extra instructions for this mode |
 | `reviewers` | which reviewers this mode uses |
-| `synthesize` | merge the reviewers' findings into one de-duplicated list |
 | `when` | `always` / `complex` / `never` — a review policy for the agent to follow |
 
 ```yaml
@@ -125,11 +112,10 @@ config:
   modes:
     balanced:
       strength: standard
-      reviewers: [ codex, qwen3.8-max ]
+      reviewers: [ codex ]
     deep:
       strength: deep
-      reviewers: [ codex, qwen3.8-max, glm-5.3 ]
-      synthesize: true
+      reviewers: [ codex, deep-dive ]
 ```
 
 With no modes configured the plugin adds no constraints at all — you keep steering the agent
@@ -147,9 +133,8 @@ knowing:
 | `defaultMode` | none | mode applied when a call omits `mode` |
 | `language` | `auto` | `zh` / `en` / `auto` report language (`auto` follows your instructions) |
 | `injectPolicy` | `false` | state each mode's `when` rule in the system prompt |
-| `agents` / `models` / `reviewers` | `[]` | define CLI, model, and subagent reviewers |
+| `agents` / `reviewers` | `[]` | define CLI and subagent reviewers (`agents` is the preset shorthand, `reviewers` the full form) |
 | `modes` | `{}` | named review modes |
-| `discover` | off | pull models straight from DSH instead of listing them |
 | `waitMs` | `120000` | how long a call blocks before handing back a job id; `0` = return immediately |
 | `hardTimeoutMs` | `0` | wall-clock ceiling; `0` = no limit — you decide when to stop it |
 | `maxResultChars` | `80000` | report cap; longer reports are truncated with a path to the full file |

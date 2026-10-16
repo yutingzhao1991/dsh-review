@@ -224,36 +224,36 @@ console.log('\nA. 配置归一化');
 	const { resolveSettings, selectReviewers, resolveMode } = await import(new URL('./lib/settings.js', import.meta.url).href);
 	const settings = resolveSettings({
 		agents: [{ preset: 'codex', model: 'gpt-x' }, { preset: 'claude' }],
-		models: [
-			{ provider: 'bailian', model: 'qwen3.8-max', label: 'Qwen' },
-			{ provider: 'bailian', model: 'glm-5.3' },
-		],
 		reviewers: [{ id: 'deep', subagentProvider: 'spawn', agentProvider: 'bailian', agentModel: 'deepseek-v4.1-flash' }],
 		defaultReviewers: ['codex', 'nope'],
 		modes: {
-			quick: { strength: 'light', reviewers: ['qwen3.8-max'], prompt: '只看阻塞问题' },
-			strict: { strength: 'deep', reviewers: ['codex', 'qwen3.8-max'], synthesize: true, when: 'complex', minChangedLines: 50 },
+			quick: { strength: 'light', reviewers: ['claude'], prompt: '只看阻塞问题' },
+			strict: { strength: 'deep', reviewers: ['codex', 'deep'], when: 'complex', minChangedLines: 50 },
 			broken: { strength: 'nonsense' },
 		},
 		defaultMode: 'strict',
 	});
 	const ids = settings.reviewers.map((reviewer) => reviewer.id);
 	check('A agents 展开成 cli', settings.reviewers.filter((r) => r.kind === 'cli').map((r) => r.id).join(',') === 'codex,claude', ids.join(','));
-	check('A models 展开成 llm', settings.reviewers.find((r) => r.id === 'qwen3.8-max')?.kind === 'llm');
+	check('A 只支持 cli 与 subagent 两种', settings.reviewers.every((r) => r.kind === 'cli' || r.kind === 'subagent'), settings.reviewers.map((r) => r.kind).join(','));
 	check('A reviewers 里的 subagent 推断出 kind', settings.reviewers.find((r) => r.id === 'deep')?.kind === 'subagent');
-	// adHoc 默认打开：未知 id 可能是调用时才解析出来的 provider/model，不能在这里丢掉。
-	check('A 开启 adHoc 时保留未知 defaultReviewers', settings.defaultReviewers.join(',') === 'codex,nope', settings.defaultReviewers.join(','));
+	// 评审者都是静态定义，写错的 id 当场过滤并告警（没有「调用时才能解析」的 id 了）。
+	check('A 未知 defaultReviewers 被过滤', settings.defaultReviewers.join(',') === 'codex', settings.defaultReviewers.join(','));
+	check('A 未知 defaultReviewers 有告警', settings.warnings.some((w) => w.includes('nope')), settings.warnings.join('|'));
+	// 升级路径：旧配置里的 models / discover 必须点名告警，不能静默让评审者消失
 	{
-		const strict = resolveSettings({ agents: [{ preset: 'codex' }], defaultReviewers: ['codex', 'nope'], discover: { adHoc: false } });
-		check('A 关闭 adHoc 时过滤未知 defaultReviewers', strict.defaultReviewers.join(',') === 'codex', strict.defaultReviewers.join(','));
-		check('A 关闭 adHoc 时给出告警', strict.warnings.some((w) => w.includes('nope')), strict.warnings.join('|'));
+		const legacy = resolveSettings({ models: [{ provider: 'bailian', model: 'qwen3.8-max' }], discover: { providers: ['bailian'] }, reviewers: [{ id: 'a', kind: 'llm', provider: 'b', model: 'm' }] });
+		check('A models 已移除时告警', legacy.warnings.some((w) => w.includes('models 已移除')), legacy.warnings.join('|'));
+		check('A discover 已移除时告警', legacy.warnings.some((w) => w.includes('discover 已移除')), legacy.warnings.join('|'));
+		check('A llm 类型给出专门告警', legacy.warnings.some((w) => w.includes('llm 类型已移除') || w.includes('该类型已移除')), legacy.warnings.join('|'));
+		check('A 旧配置不会凭空留下列表', legacy.reviewers.length === 0, JSON.stringify(legacy.reviewers));
 	}
 	check('A 未知 strength 降级为 standard', settings.modes.broken?.strength === 'standard');
 	check('A 未知 strength 有告警', settings.warnings.some((w) => w.includes('nonsense')));
 	check('A defaultMode 生效', settings.defaultMode === 'strict');
 	check('A resolveMode 默认模式', resolveMode(settings).name === 'strict');
 	const selected = selectReviewers(settings, settings.modes.quick, undefined);
-	check('A 模式指定评审者优先', selected.map((r) => r.id).join(',') === 'qwen3.8-max', selected.map((r) => r.id).join(','));
+	check('A 模式指定评审者优先', selected.map((r) => r.id).join(',') === 'claude', selected.map((r) => r.id).join(','));
 	check('A 调用方指定评审者最高优先', selectReviewers(settings, settings.modes.quick, ['codex']).map((r) => r.id).join(',') === 'codex');
 	await rejects('A 未知模式报错', () => resolveMode(settings, 'nope'));
 	await rejects('A 未知评审者报错', () => selectReviewers(settings, undefined, ['ghost']));
@@ -268,8 +268,9 @@ console.log('\nA. 配置归一化');
 		await rejects('A 未勾选任何评审者时报错', () => selectReviewers(empty, undefined, undefined));
 	}
 
-	const bad = resolveSettings({ reviewers: [{ id: 'x', kind: 'llm' }, { kind: 'cli' }, { id: 'y', kind: 'nope' }] });
-	check('A 非法评审者被丢弃', bad.reviewers.length === 0 && bad.warnings.length === 3, `${bad.reviewers.length}/${bad.warnings.length}`);
+	const bad = resolveSettings({ reviewers: [{ id: 'x', kind: 'llm' }, { id: 'y', kind: 'nope' }] });
+	// kind: 'llm' 已经不存在了——写它和写一个乱码 kind 一样会被丢弃并告警。
+	check('A 非法/已移除的 kind 被丢弃', bad.reviewers.length === 0 && bad.warnings.length >= 2, `${bad.reviewers.length}/${bad.warnings.length}`);
 	await rejects('A 没有评审者时报错清晰', () => selectReviewers(bad, undefined, undefined));
 }
 
@@ -279,14 +280,13 @@ console.log('\nB. 工具描述与参数校验');
 {
 	const h = await loadPlugin({
 		plugin: {
-			agents: [{ preset: 'codex' }],
-			models: [{ provider: 'bailian', model: 'qwen3.8-max' }],
+			agents: [{ preset: 'codex' }, { preset: 'claude' }],
 			modes: { deep: { strength: 'deep', description: '彻底评审' } },
 		},
 	});
 	check('B 工具名是 review', h.definition.name === 'review', h.definition.name);
 	const description = h.definition.description;
-	check('B 描述列出评审者', description.includes('`codex`') && description.includes('`qwen3.8-max`'));
+	check('B 描述列出评审者', description.includes('`codex`') && description.includes('`claude`'));
 	check('B 描述列出模式', description.includes('`deep`') && description.includes('彻底评审'));
 	check('B 描述强调 base/commit 与 instructions 互斥', description.includes('互斥'));
 	check('B 参数含 reviewers/mode/base/commit/instructions', Object.keys(h.definition.parameters.properties).join(',') === 'reviewers,mode,base,commit,instructions');
@@ -386,75 +386,6 @@ console.log('\nC. CLI 评审者');
 	check('C 找不到可执行文件时报告里写明', value.report.includes('找不到可执行文件') && value.report.includes('no-such-bin-xyz'), value.report.slice(0, 400));
 }
 
-/* ────────────────────────────── D. LLM 评审者 ────────────────────────────── */
-
-console.log('\nD. LLM 评审者');
-{
-	const llmCalls = [];
-	const services = {
-		llm: {
-			stream(options) {
-				llmCalls.push(options);
-				return (async function* stream() {
-					yield { type: 'block-start', index: 0, blockType: 'text' };
-					yield { type: 'text-delta', index: 0, text: '[P1] src/a.js:1 — 空指针 — 加判空' };
-					yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } };
-					yield { type: 'finish', reason: { kind: 'stop' } };
-				})();
-			},
-		},
-	};
-	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max', label: 'Qwen', llm: { maxTokens: 4096, temperature: 0 } }] },
-		harness: { ...GIT, services },
-	});
-	const value = await run(h, {});
-	check('D 结论进报告', value.report.includes('[P1] src/a.js:1'), value.report.slice(0, 300));
-	check('D 报告标注 provider/model', value.report.includes('bailian/qwen3.8-max'));
-	check('D 调用了 ctx.llm', llmCalls.length === 1 && llmCalls[0].provider === 'bailian' && llmCalls[0].model === 'qwen3.8-max');
-	check('D 传了 system 与 user 消息', typeof llmCalls[0].system === 'string' && llmCalls[0].messages[0].content[0].type === 'text');
-	check('D 传了 maxTokens/temperature', llmCalls[0].maxTokens === 4096 && llmCalls[0].temperature === 0);
-	check('D 消息里带 diff 包', llmCalls[0].messages[0].content[0].text.includes('const a = 2'));
-	check('D 消息里带未跟踪文件', llmCalls[0].messages[0].content[0].text.includes('export const b = 2;'));
-	check('D 语音按中文提示词', llmCalls[0].system.includes('资深代码评审者'));
-}
-{
-	const services = {
-		llm: {
-			*stream() {
-				yield { type: 'text-delta', index: 0, text: '' };
-				yield { type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH', message: 'bad key' } } };
-			},
-		},
-	};
-	const h = await loadPlugin({ plugin: { models: [{ provider: 'bailian', model: 'glm-5.3' }] }, harness: { ...GIT, services } });
-	const value = await run(h, {});
-	check('D 模型失败被收敛', value.report.includes('**失败**') && value.report.includes('AUTH'), value.report.slice(0, 300));
-}
-{
-	// 没有 llm 服务：报告里说明，而不是抛给上层。
-	const h = await loadPlugin({ plugin: { models: [{ provider: 'bailian', model: 'glm-5.3' }] }, harness: { ...GIT } });
-	const value = await run(h, {});
-	check('D 缺 ctx.llm 时给出说明', value.report.includes('ctx.llm 服务不可用'), value.report.slice(0, 300));
-}
-{
-	// 模式的强度短语与 prompt 都要进 llm 的 system 槽。
-	const calls = [];
-	const services = { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } };
-	const h = await loadPlugin({
-		plugin: {
-			models: [{ provider: 'bailian', model: 'qwen3.8-max' }],
-			modes: { strict: { strength: 'deep', prompt: '只关注错误处理', reviewers: ['qwen3.8-max'] } },
-			defaultMode: 'strict',
-		},
-		harness: { ...GIT, services },
-	});
-	await run(h, {});
-	check('D 模式强度写进 system', calls[0].system.includes('深度评审') && calls[0].system.includes('只关注错误处理'), calls[0].system.slice(0, 200));
-	check('D 模式信息进 user 消息', calls[0].messages[0].content[0].text.includes('评审模式：`strict`（deep）'));
-	check('D 模式 prompt 不泄漏到 codex 之外的评审者', !calls[0].messages[0].content[0].text.includes('### 本次评审强度'));
-}
-
 /* ────────────────────────────── E. 子智能体评审者 ────────────────────────────── */
 
 console.log('\nE. 子智能体评审者');
@@ -493,14 +424,14 @@ console.log('\nE. 子智能体评审者');
 
 console.log('\nF. 编排');
 {
-	const services = { llm: { *stream() { yield { type: 'text-delta', index: 0, text: 'LLM 结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; } } };
+	// 多评审者：两个 CLI 智能体各评一遍，报告里各一节。
 	const h = await loadPlugin({
-		plugin: { agents: [{ preset: 'codex' }], models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
-		harness: { ...GIT, report: 'Codex 结论', services },
+		plugin: { agents: [{ preset: 'codex' }, { preset: 'claude' }] },
+		harness: { ...GIT, report: 'Codex 结论' },
 	});
 	const value = await run(h, {});
-	check('F 多评审者都出现', value.report.includes('Codex 结论') && value.report.includes('LLM 结论'));
-	check('F reviewers 字段回填', value.reviewers.join(',') === 'codex,qwen3.8-max', JSON.stringify(value.reviewers));
+	check('F 多评审者都出现', value.report.includes('`codex`') && value.report.includes('`claude`'), value.report.slice(0, 300));
+	check('F reviewers 字段回填', value.reviewers.join(',') === 'codex,claude', JSON.stringify(value.reviewers));
 	check('F status=completed', value.status === 'completed', value.detail);
 	check('F job 已移除', h.state.jobs.size === 0);
 }
@@ -524,13 +455,11 @@ console.log('\nF. 编排');
 }
 {
 	// 一个评审者失败不影响另一个。
-	const services = { llm: { *stream() { yield { type: 'text-delta', index: 0, text: 'LLM 结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; } } };
 	const h = await loadPlugin({
-		plugin: { agents: [{ preset: 'codex' }, { preset: 'gemini' }], models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
+		plugin: { agents: [{ preset: 'codex' }, { preset: 'gemini' }] },
 		harness: {
 			...GIT,
 			report: 'Codex 结论',
-			services,
 			gitScript: defaultGitScript(WORK),
 		},
 	});
@@ -545,36 +474,6 @@ console.log('\nF. 编排');
 	const value = await run(h, {});
 	check('F 全失败时 status=failed', value.status === 'failed', value.status);
 	check('F 全失败时仍有报告', value.report.includes('boom'));
-}
-{
-	// 深评审汇总：合成一次额外 llm 调用。
-	const calls = [];
-	const services = {
-		llm: {
-			stream(options) {
-				calls.push(options);
-				const text = calls.length === 1 ? '评审者 A 的结论' : '汇总后的结论';
-				return (async function* stream() {
-					yield { type: 'text-delta', index: 0, text };
-					yield { type: 'finish', reason: { kind: 'stop' } };
-				})();
-			},
-		},
-	};
-	const h = await loadPlugin({
-		plugin: {
-			models: [
-				{ provider: 'bailian', model: 'qwen3.8-max' },
-				{ provider: 'bailian', model: 'glm-5.3' },
-			],
-			modes: { deep: { strength: 'deep', synthesize: true } },
-			defaultMode: 'deep',
-		},
-		harness: { ...GIT, services },
-	});
-	const value = await run(h, {});
-	check('F 汇总调用发生', calls.length === 3, `${calls.length}`);
-	check('F 汇总结论进报告', value.report.includes('汇总后的结论') && value.report.includes('汇总（评审结论合并）'), value.report.slice(-400));
 }
 {
 	// 截断：完整报告落盘，结果里给出路径。
@@ -619,8 +518,8 @@ console.log('\nF. 编排');
 console.log('\nG. 边界');
 {
 	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
-		harness: { ...GIT, gitScript: [{ argv: ['git', 'rev-parse', '--is-inside-work-tree'], exitCode: 128, stderr: 'not a git repository' }], services: { llm: { *stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; } } } },
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: '结论', gitScript: [{ argv: ['git', 'rev-parse', '--is-inside-work-tree'], exitCode: 128, stderr: 'not a git repository' }] },
 	});
 	const value = await run(h, {});
 	check('G 非 git 目录有说明', value.report.includes('不是 git 仓库'), value.report.slice(0, 300));
@@ -641,7 +540,7 @@ console.log('\nG. 边界');
 		{ argv: ['git', 'rev-parse', '--show-toplevel'], stdout: `${WORK}\n` },
 		{ argv: ['git', '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-z', '-uall'], stdout: '' },
 	];
-	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }], models: [{ provider: 'bailian', model: 'qwen3.8-max' }] }, harness: { ...GIT, gitScript: clean, report: '结论' } });
+	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, gitScript: clean, report: '结论' } });
 	const value = await run(h, {});
 	check('G 无改动时短路', value.report.includes('未检测到需要评审的改动') && !value.report.includes('结论'), value.report.slice(0, 300));
 	check('G 无改动时不调评审者', !h.state.spawns.some((spec) => spec.argv[0] === '/fake/codex'));
@@ -674,16 +573,18 @@ console.log('\nG. 边界');
 console.log('\nH. 回归');
 {
 	// 未跟踪目录要用 -uall 展开成文件，并且路径按仓库根解析（不是 cwd）。
+	// 用 stdin 投递的自定义 CLI 评审者，好从它收到的正文里看评审包。
 	const statusArgv = h => h.state.spawns.filter((spec) => spec.argv.includes('status')).map((spec) => spec.argv.join(' '));
-	const calls = [];
 	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
-		harness: { ...GIT, services: { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } } },
+		plugin: { reviewers: [{ id: 'my', kind: 'cli', command: ['{exe}'], executable: 'myreview', promptVia: 'stdin', capture: 'stdout' }], defaultReviewers: ['my'] },
+		harness: { ...GIT, stdout: '结论' },
 	});
 	await run(h, {});
 	check('H status 用 -uall', statusArgv(h).some((argv) => argv.includes('-uall')), statusArgv(h).join('|'));
 	check('H 解析仓库根', h.state.spawns.some((spec) => spec.argv.join(' ') === 'git rev-parse --show-toplevel'));
-	check('H 未跟踪文件按仓库根路径读到正文', calls[0].messages[0].content[0].text.includes('export const b = 2;'), calls[0].messages[0].content[0].text.slice(-400));
+	// 评审包正文喂给会读包的 CLI 评审者，从它的 stdin 里看。
+	const packet = h.state.spawns.map((spec) => spec.stdio?.stdin?.data ?? '').join('\n');
+	check('H 未跟踪文件按仓库根路径读到正文', packet.includes('export const b = 2;'), packet.slice(-300));
 }
 {
 	// 两个 capture: report 的评审者，id 洗过之后同名，也不能互相覆盖结论文件。
@@ -701,24 +602,6 @@ console.log('\nH. 回归');
 	const reportFlags = h.state.spawns.filter((spec) => spec.argv.includes('--output-last-message')).map((spec) => spec.argv[spec.argv.indexOf('--output-last-message') + 1]);
 	seen.push(...reportFlags);
 	check('H 两个评审者文件名不同', new Set(reportFlags).size === 2, reportFlags.join(', '));
-}
-{
-	// 被禁用的 llm 评审者不该被选来汇总。
-	const calls = [];
-	const services = { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: 'x' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } };
-	const h = await loadPlugin({
-		plugin: {
-			reviewers: [
-				{ id: 'dis', kind: 'llm', provider: 'bailian', model: 'glm-5.3', enabled: false },
-				{ id: 'on', kind: 'llm', provider: 'bailian', model: 'qwen3.8-max' },
-			],
-			modes: { deep: { synthesize: true, synthesizeReviewer: 'dis' } },
-			defaultMode: 'deep',
-		},
-		harness: { ...GIT, services },
-	});
-	await run(h, {});
-	check('H 汇总不用被禁用的评审者', calls.every((call) => call.model !== 'glm-5.3'), JSON.stringify(calls.map((call) => call.model)));
 }
 {
 	// 未截断时清掉临时目录；截断时保留（结果里引用了路径）。
@@ -770,13 +653,12 @@ console.log('\nH. 回归');
 }
 {
 	// 回归：commit 范围不把当前未跟踪文件算进材料，也不算进变更规模。
-	const calls = [];
 	const h = await loadPlugin({
-		plugin: { models: [{ provider: 'bailian', model: 'qwen3.8-max' }] },
-		harness: { ...GIT, services: { llm: { stream(options) { calls.push(options); return (async function* stream() { yield { type: 'text-delta', index: 0, text: '结论' }; yield { type: 'finish', reason: { kind: 'stop' } }; })(); } } } },
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: '结论' },
 	});
 	const value = await run(h, { commit: 'abc123' });
-	const prompt = calls[0].messages[0].content[0].text;
+	const prompt = h.state.spawns.map((spec) => spec.stdio?.stdin?.data ?? '').join('\n');
 	check('H commit 范围不含未跟踪正文', !prompt.includes('export const b = 2;'), prompt.slice(-400));
 	check('H commit 范围不虚增变更规模', value.report.includes('1 个文件'), value.report.slice(0, 300));
 	check('H 未跟踪文件被说明为范围外', value.report.includes('不属于本次范围'), value.report.slice(-400));
@@ -831,122 +713,6 @@ console.log('\nH. 回归');
 	await run(h, { base: 'main' });
 	const argv = h.state.spawns.find((spec) => spec.argv[0] === '/fake/plain').argv;
 	check('H 普通自定义模板保留范围与提示词', argv.includes('--base') && argv.includes('main') && argv.at(-1).includes('评审任务'), JSON.stringify(argv.slice(0, 4)));
-}
-
-/* ────────────────────────────── I. 模型发现与按需指名 ────────────────────────────── */
-
-console.log('\nI. 模型发现与按需指名');
-
-/** 一个「DSH 里已经配好模型」的假 llm 服务：provider/model 列表 + 会记账的 stream。 */
-function fakeLlm(catalog = { bailian: ['qwen3.8-max', 'glm-5.3', 'text-embedding-v3'], 'deepseek-official': ['deepseek-v4-flash'] }) {
-	const calls = [];
-	return {
-		calls,
-		listProviders: () => Object.keys(catalog).map((id) => ({ id, name: id === 'bailian' ? '百炼' : id })),
-		async listModels(provider) {
-			if (catalog[provider] === undefined) throw new Error('NO_ADAPTER');
-			return catalog[provider].map((id) => ({ provider, id, name: id }));
-		},
-		stream(options) {
-			calls.push(options);
-			return (async function* stream() {
-				yield { type: 'text-delta', index: 0, text: `[结论] ${options.provider}/${options.model}` };
-				yield { type: 'finish', reason: { kind: 'stop' } };
-			})();
-		},
-	};
-}
-
-/** 只跑一次评审、拿回假 llm 的调用记录。 */
-async function reviewWith(plugin, args, catalog) {
-	const llm = fakeLlm(catalog);
-	const h = await loadPlugin({ plugin, harness: { ...GIT, services: { llm } } });
-	const value = await run(h, args);
-	return { value, llm, h };
-}
-
-{
-	// 默认：不打开 discover，但可以直接按 provider/model 指名 DSH 里已注册的模型。
-	const { value, llm } = await reviewWith({ agents: [{ preset: 'codex' }] }, { reviewers: ['bailian/glm-5.3'] });
-	check('I 默认允许按需指名', llm.calls.length === 1 && llm.calls[0].provider === 'bailian' && llm.calls[0].model === 'glm-5.3', JSON.stringify(llm.calls.map((c) => `${c.provider}/${c.model}`)));
-	check('I 报告标注「按需指名」', value.report.includes('按需指名') && value.report.includes('bailian/glm-5.3'), value.report.slice(0, 400));
-	check('I 按需指名进了 reviewers 字段', value.reviewers.join(',') === 'bailian/glm-5.3', JSON.stringify(value.reviewers));
-	check('I 报告脚注说明来源', value.report.includes('不在插件配置里'), value.report.slice(-500));
-}
-{
-	// 不存在的模型不会被凭空造出来：报错并列出 DSH 现在有什么。
-	const llm = fakeLlm();
-	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, services: { llm } } });
-	const error = await rejects('I 拒绝未注册的模型', () => run(h, { reviewers: ['bailian/no-such-model'] }));
-	check('I 报错列出已注册模型', error?.message.includes('bailian/qwen3.8-max'), error?.message);
-}
-{
-	// discover 展开：providers 是范围键，写了就自动打开。
-	const { value, llm } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'], exclude: ['*embed*'] } }, { reviewers: ['bailian/qwen3.8-max', 'bailian/glm-5.3'] });
-	check('I discover 展开后两个模型都跑', llm.calls.length === 2, JSON.stringify(llm.calls.map((c) => c.model)));
-	check('I exclude 生效（embedding 不在候选里）', value.report.includes('已把 2 个模型纳入评审者'), value.report.slice(-600));
-	check('I 展开的评审者报告里标「自动发现」', value.report.includes('自动发现'), value.report.slice(0, 600));
-}
-{
-	// 裸模型名：唯一才认。
-	const { llm } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian'] } }, { reviewers: ['glm-5.3'] });
-	check('I 裸模型名唯一时可用', llm.calls.length === 1 && llm.calls[0].model === 'glm-5.3', JSON.stringify(llm.calls.map((c) => c.model)));
-}
-{
-	// discover.inDefault：进入默认集合。
-	const { llm } = await reviewWith({ discover: { providers: ['bailian'], include: ['glm*'], inDefault: true } }, {});
-	check('I inDefault 时自动展开者进默认集合', llm.calls.length === 1 && llm.calls[0].model === 'glm-5.3', JSON.stringify(llm.calls.map((c) => c.model)));
-	// 只有 discover、没开 inDefault、也没勾任何评审者：默认集合是空的 → 直接报错（不是把能用的都跑一遍）。
-	await rejects('I 未开 inDefault 且没勾选时报错', () => reviewWith({ discover: { providers: ['bailian'], include: ['glm*'] } }, {}));
-	// 显式传 reviewers 仍然照跑。
-	const explicit = await reviewWith({ discover: { providers: ['bailian'], include: ['glm*'] } }, { reviewers: ['bailian/glm-5.3'] });
-	check('I 未勾选但显式指名可用', explicit.llm.calls.length === 1 && explicit.llm.calls[0].model === 'glm-5.3', JSON.stringify(explicit.llm.calls.map((c) => c.model)));
-}
-{
-	// adHoc 关掉后，未配置的模型不可用；defaultReviewers 也在加载时被过滤。
-	const llm = fakeLlm();
-	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }], discover: { adHoc: false } }, harness: { ...GIT, services: { llm } } });
-	const error = await rejects('I 关闭 adHoc 后拒绝按需指名', () => run(h, { reviewers: ['bailian/glm-5.3'] }));
-	check('I 关闭 adHoc 的报错说明原因', error?.message.includes('adHoc'), error?.message);
-}
-{
-	// 没有静态评审者也能用：discover 单独撑起整个工具。
-	const { llm, value } = await reviewWith({ discover: { providers: ['bailian'], include: ['qwen*'], inDefault: true } }, {});
-	check('I 只配 discover + inDefault 也能评审', llm.calls.length === 1 && llm.calls[0].model === 'qwen3.8-max', JSON.stringify(llm.calls.map((c) => c.model)));
-	check('I 报告头列出发现的评审者', value.reviewers.join(',') === 'bailian/qwen3.8-max', JSON.stringify(value.reviewers));
-}
-{
-	// discover 指定的 provider 没注册：跳过并说明，不报错。
-	const { value } = await reviewWith({ agents: [{ preset: 'codex' }], discover: { providers: ['bailian', 'ghost'] } }, { reviewers: ['bailian/glm-5.3'] });
-	check('I 未注册的 provider 被跳过并说明', value.report.includes('"ghost" 当前没有注册'), value.report.slice(-600));
-}
-{
-	// listModels 抛错 / 超时：只跳过那个 provider。
-	const llm = {
-		listProviders: () => [{ id: 'bailian', name: '百炼' }, { id: 'broken', name: 'broken' }],
-		async listModels(provider) {
-			if (provider === 'broken') throw new Error('boom');
-			return [{ provider, id: 'qwen3.8-max', name: 'qwen3.8-max' }];
-		},
-		*stream() {
-			yield { type: 'text-delta', index: 0, text: '结论' };
-			yield { type: 'finish', reason: { kind: 'stop' } };
-		},
-	};
-	// discover: true 展开全部 provider，inDefault 让它们进默认集合（否则「一个都不选」= 不启用）。
-	const h = await loadPlugin({ plugin: { discover: { enabled: true, inDefault: true } }, harness: { ...GIT, services: { llm } } });
-	const value = await run(h, {});
-	check('I 一个 provider 报错不影响其他', value.report.includes('结论') && value.report.includes('模型列表获取失败，已跳过'), value.report.slice(-600));
-}
-{
-	// 工具描述要把「可以直接写 provider/model」讲清楚。
-	const llm = fakeLlm();
-	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, services: { llm } } });
-	const description = h.definition.description;
-	check('I 描述说明可按需指名', description.includes('provider/model') && description.includes('已注册的任意模型'), description.slice(0, 600));
-	check('I 描述列出已注册 provider', description.includes('bailian') && description.includes('deepseek-official'), description.slice(0, 700));
-	const withDiscover = await loadPlugin({ plugin: { discover: { providers: ['bailian'], exclude: ['*embed*'] } }, harness: { ...GIT, services: { llm } } });
-	check('I 描述说明 discover 已打开', withDiscover.definition.description.includes('discover') && withDiscover.definition.description.includes('已排除'), withDiscover.definition.description.slice(0, 700));
 }
 
 /* ────────────────────────────── J. 浏览器半边（client bundle） ────────────────────────────── */
@@ -1073,15 +839,14 @@ async function loadClientBundle(options = {}) {
 		getSnapshot: () => ({
 			status: 'ready',
 			value: options.value ?? {
-				defaultReviewers: ['codex', 'qwen'],
+				defaultReviewers: ['codex'],
 				injectPolicy: true,
 				language: 'zh',
 				reviewers: [
 					{ id: 'codex', kind: 'cli', preset: 'codex', executable: 'codex' },
-					{ id: 'qwen', kind: 'llm', provider: 'bailian', model: 'qwen3.8-max' },
+					{ id: 'deep', kind: 'subagent', provider: 'spawn', agentProvider: 'bailian', agentModel: 'deepseek-v4.1-flash' },
 				],
-				modes: { deep: { strength: 'deep', reviewers: ['codex', 'qwen'], synthesize: true, when: 'complex' } },
-				discover: { enabled: true, providers: ['bailian'], exclude: ['*embedding*'] },
+				modes: { deep: { strength: 'deep', reviewers: ['codex', 'deep'], when: 'complex' } },
 			},
 			base: {},
 			user: {},
@@ -1211,24 +976,7 @@ function findAll(node, predicate) {
 	check('J serializeModes 往返一致', Object.keys(JSON.parse(I.serializeModes(modes))).join(',') === 'deep,quick');
 	check('J modeRows 对数组/坏 JSON 返回空', I.modeRows('[1]').length === 0 && I.modeRows('{bad').length === 0);
 	// 开关的「生效值」必须与宿主侧推断一致，否则会显示成关闭而实际开着。
-	check('J 生效值：显式 true/false 优先', I.effectiveDiscoverEnabled('true', '', '') === true && I.effectiveDiscoverEnabled('false', 'bailian', 'qwen*') === false);
-	check('J 生效值：写了 providers 就算打开', I.effectiveDiscoverEnabled('', 'bailian', '') === true);
-	check('J 生效值：写了 include 也算打开', I.effectiveDiscoverEnabled('', '', 'qwen*') === true);
-	check('J 生效值：什么都没写就不打开', I.effectiveDiscoverEnabled('', '', '') === false && I.effectiveDiscoverEnabled(undefined, undefined, undefined) === false);
-	check('J cleanupModeBody 删掉空值', JSON.stringify(I.cleanupModeBody({ when: '', synthesize: undefined, reviewers: [], strength: 'deep', minChangedLines: Number.NaN })) === JSON.stringify({ strength: 'deep' }));
-
-	// ── glob 语义：include/exclude 全靠它，匹配错了会静默筛掉/留下错误的模型 ──
-	{
-		const { matchesPattern } = await import(new URL('./lib/discovery.js', import.meta.url).href);
-		check('J glob 裸模式按模型名匹配', matchesPattern('*embed*', 'bailian', 'text-embedding-v3') === true);
-		check('J glob 裸模式不匹配无关模型', matchesPattern('*embed*', 'bailian', 'qwen3.8-max') === false);
-		check('J glob 带 / 时按 provider/model 匹配', matchesPattern('bailian/qwen*', 'bailian', 'qwen3.8-max') === true);
-		check('J glob 带 / 时看 provider', matchesPattern('bailian/qwen*', 'deepseek-official', 'qwen3.8-max') === false);
-		check('J glob 大小写不敏感', matchesPattern('QWEN*', 'bailian', 'qwen3.8-max') === true);
-		check('J glob ? 匹配单个字符', matchesPattern('qwen?.8-max', 'bailian', 'qwen3.8-max') === true && matchesPattern('qwen?.8-max', 'bailian', 'qwen38-max') === false);
-		check('J glob 不做部分匹配（整串锚定）', matchesPattern('qwen', 'bailian', 'qwen3.8-max') === false);
-		check('J glob 特殊字符按字面处理', matchesPattern('a.b*', 'p', 'a.bc') === true && matchesPattern('a.b*', 'p', 'axbc') === false);
-	}
+	check('J cleanupModeBody 删掉空值', JSON.stringify(I.cleanupModeBody({ when: '', reviewers: [], strength: 'deep', minChangedLines: Number.NaN })) === JSON.stringify({ strength: 'deep' }));
 
 	// ── 目录映射与选项推导 ──
 	const groups = I.catalogGroups({ groups: [{ id: 'bailian', name: '百炼', models: [{ id: 'qwen3.8-max' }] }, { nonsense: true }, { id: 'x', models: [null, { id: 'ok' }] }] });
@@ -1238,23 +986,24 @@ function findAll(node, predicate) {
 	check('J selectOptions 保留不在列表里的当前值', options.length === 2 && options[1].value === 'zzz', JSON.stringify(options));
 	check('J presetExecutable 把 cursor 映射到 cursor-agent', I.presetExecutable('cursor') === 'cursor-agent' && I.presetExecutable('codex') === 'codex');
 	const withCatalog = I.newReviewerRow(3, groups);
-	check('J 新行优先给模型评审者', withCatalog.kind === 'llm' && withCatalog.provider === 'bailian' && withCatalog.model === 'qwen3.8-max' && withCatalog.id === 'reviewer-3', JSON.stringify(withCatalog));
+	// 有模型目录时给子智能体（现在只剩这一种「用 DSH 里配好的模型」的方式）。
+	check('J 新行优先给子智能体', withCatalog.kind === 'subagent' && withCatalog.provider === 'spawn' && withCatalog.agentProvider === 'bailian' && withCatalog.agentModel === 'qwen3.8-max' && withCatalog.id === 'reviewer-3', JSON.stringify(withCatalog));
 	const withoutCatalog = I.newReviewerRow(1, []);
 	check('J 没有目录时新行给 codex CLI', withoutCatalog.kind === 'cli' && withoutCatalog.preset === 'codex' && withoutCatalog.executable === 'codex', JSON.stringify(withoutCatalog));
 
 	// ── 字段清单：每个字段都有控件与分组 ──
 	const paths = I.FIELDS.map((field) => field.path);
-	check('J 字段数量', I.FIELDS.length === 20, String(I.FIELDS.length));
+	check('J 字段数量', I.FIELDS.length === 13, String(I.FIELDS.length));
 	check('J 字段路径唯一', new Set(paths).size === paths.length);
 	// 结构：defaultReviewers 归顶部列表，reviewers 常显，其余都在 advanced 的子分组里
 	const bySection = (section) => I.FIELDS.filter((field) => field.section === section).map((field) => field.path).sort().join(',');
 	check('J 顶部列表只管 defaultReviewers', bySection('active') === 'defaultReviewers', bySection('active'));
 	check('J 评审者定义常显', bySection('reviewers') === 'reviewers', bySection('reviewers'));
-	check('J 其余字段都在高级配置里', I.FIELDS.filter((field) => field.section === 'advanced').length === 18, String(I.FIELDS.filter((field) => field.section === 'advanced').length));
+	check('J 其余字段都在高级配置里', I.FIELDS.filter((field) => field.section === 'advanced').length === 11, String(I.FIELDS.filter((field) => field.section === 'advanced').length));
 	check('J 高级子分组都非空', I.ADVANCED_GROUPS.every((group) => I.FIELDS.some((field) => field.section === 'advanced' && field.group === group.key)), JSON.stringify(I.ADVANCED_GROUPS));
 	const switchFields = I.FIELDS.filter((field) => field.control === 'switch').length;
 	const textFields = I.FIELDS.filter((field) => field.control === 'text' || field.control === 'number').length;
-	check('J 布尔字段用 Switch', switchFields === 4, String(switchFields));
+	check('J 布尔字段用 Switch', switchFields === 1, String(switchFields));
 	check('J 结构化编辑器接管 reviewers/modes', I.FIELDS.filter((field) => field.control === 'reviewers' || field.control === 'modes').map((field) => field.path).join(',') === 'reviewers,modes');
 	check('J 数字字段都给了 numeric', I.FIELDS.filter((field) => field.control === 'number').every((field) => field.numeric === true));
 
@@ -1269,10 +1018,10 @@ function findAll(node, predicate) {
 		const zhKeys = Object.keys(dictionaries.zh).sort();
 		const enKeys = Object.keys(dictionaries.en).sort();
 		check('J 中英字典键完全一致', JSON.stringify(zhKeys) === JSON.stringify(enKeys), `只在 zh: ${zhKeys.filter((k) => !enKeys.includes(k)).join(',')} / 只在 en: ${enKeys.filter((k) => !zhKeys.includes(k)).join(',')}`);
-		check('J 字典键数量合理', zhKeys.length >= 100, String(zhKeys.length));
+		check('J 字典键数量合理', zhKeys.length >= 80, String(zhKeys.length));
 		// 每个键都要被用到（t('key')、三元里的键、以及 FIELDS 里的 label/hint）
 		const source = readFileSync(new URL('./client/client.js', import.meta.url), 'utf8');
-		const used = new Set([...source.matchAll(/t\('([A-Za-z0-9]+)'\)/g)].map((match) => match[1]));
+		const used = new Set([...source.matchAll(/(?<![A-Za-z0-9_$])t\('([A-Za-z0-9]+)'\)/g)].map((match) => match[1]));
 		for (const match of source.matchAll(/\?\s*'([A-Za-z0-9]+)'\s*:\s*'([A-Za-z0-9]+)'/g)) {
 			used.add(match[1]);
 			used.add(match[2]);
@@ -1280,6 +1029,12 @@ function findAll(node, predicate) {
 		for (const match of source.matchAll(/(?:label|hint|invalid):\s*'([A-Za-z0-9]+)'/g)) used.add(match[1]);
 		const unused = zhKeys.filter((key) => !used.has(key));
 		check('J 没有没人用的文案键', unused.length === 0, unused.join(','));
+		// 反过来也要查：用到的键必须两种语言都有（之前 catalogLoading 就是被删了但还在用，
+		// 界面上会显示成键名——只查「有没有人用」抓不到这种）。
+		// 只看真正的字典查找 `t('key')`：三元里的字符串常量不一定是文案键。
+		const tKeys = new Set([...source.matchAll(/(?<![A-Za-z0-9_$])t\('([A-Za-z0-9]+)'\)/g)].map((match) => match[1]));
+		const missing = [...tKeys].filter((key) => !zhKeys.includes(key));
+		check('J 用到的文案键都存在', missing.length === 0, missing.join(','));
 	}
 
 	check('J 读取 review 命名空间', captured.entry === 'review', captured.entry);
@@ -1290,11 +1045,16 @@ function findAll(node, predicate) {
 	check('J inject 提供表单 hook、目录 hook 与写动作', Boolean(face.hooks?.reviewConfigForm) && Boolean(face.hooks?.reviewCatalog) && typeof face.save === 'function' && typeof face.edit === 'function' && typeof face.resetField === 'function', Object.keys(face).join(','));
 	check('J 布尔 spec 认是/否', JSON.stringify(spec('injectPolicy').parse('是')) === JSON.stringify({ kind: 'set', value: true }) && JSON.stringify(spec('injectPolicy').parse('off')) === JSON.stringify({ kind: 'set', value: false }));
 	check('J 布尔 spec 拒绝乱填', spec('injectPolicy').parse('maybe') === undefined);
-	check('J 列表 spec 空值 = 清除', JSON.stringify(spec('discover.exclude').parse('  ')) === JSON.stringify({ kind: 'clear' }));
+	check('J 列表 spec 空值 = 清除', JSON.stringify(spec('reviewers').parse('  ')) === JSON.stringify({ kind: 'clear' }));
 	check('J 数字 spec 拒绝负数与小数', spec('maxArgBytes').parse('-1') === undefined && spec('waitMs').parse('1.5') === undefined && spec('waitMs').parse('60000')?.value === 60000);
-	check('J reviewers spec 接受合法数组', Array.isArray(spec('reviewers').parse('[{"id":"a","kind":"llm"}]')?.value));
-	check('J reviewers spec 拒绝缺 id', spec('reviewers').parse('[{"kind":"llm"}]') === undefined);
-	check('J reviewers spec 拒绝非法 kind', spec('reviewers').parse('[{"id":"a","kind":"nope"}]') === undefined);
+	check('J reviewers spec 接受合法数组', Array.isArray(spec('reviewers').parse('[{"id":"a","kind":"subagent"}]')?.value));
+	check('J reviewers spec 拒绝缺 id', spec('reviewers').parse('[{"kind":"cli"}]') === undefined);
+	// kind 不在表单侧卡死（老配置的 llm 行要让整表仍可保存，宿主会告警并忽略它）。
+	check('J reviewers spec 原样带过已移除的 kind', spec('reviewers').parse('[{"id":"a","kind":"llm"}]')?.value?.[0]?.kind === 'llm');
+	check('J reviewers spec 也带过乱码 kind', spec('reviewers').parse('[{"id":"a","kind":"nope"}]')?.value?.[0]?.id === 'a');
+	// 行内要提示这个类型已移除，而不是静默当作子智能体
+	const legacy = { shell: { available: true, writable: true, dirty: false, invalid: false, saving: false, failed: false }, fields: {} };
+	check('J 已移除的类型有说明文案', Object.hasOwn(captured.locales[0].dictionaries.zh, 'reviewerKindRemoved') && Object.hasOwn(captured.locales[0].dictionaries.en, 'reviewerKindRemoved'));
 	check('J reviewers spec 拒绝对象', spec('reviewers').parse('{"id":"a"}') === undefined);
 	check('J modes spec 接受合法对象', Object.keys(spec('modes').parse('{"deep":{"strength":"deep"}}')?.value ?? {}).join(',') === 'deep');
 	check('J modes spec 拒绝非法 strength', spec('modes').parse('{"deep":{"strength":"nope"}}') === undefined);
@@ -1328,9 +1088,11 @@ function findAll(node, predicate) {
 	// 顶部列表：2 个定义（codex / qwen），都被 defaultReviewers 勾上，并显示指向什么
 	const activeList = findAll(element, (node) => node.props?.className === 'dsh-review-active-item');
 	check('J 顶部列出全部启用的评审者', activeList.length === 2, String(activeList.length));
-	check('J 顶部列出 id 与指向', findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children).join(',') === 'codex,qwen', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children)));
-	check('J 顶部显示指向的模型/可执行', findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children).join(' | ') === 'cli · codex | llm · bailian/qwen3.8-max', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children)));
-	check('J 顶部开关反映勾选状态', findAll(element, (node) => node.props?.className === 'dsh-review-active-item').every((item) => findAll(item, (node) => node.type === 'Switch')[0]?.props.checked === true));
+	check('J 顶部列出 id 与指向', findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children).join(',') === 'codex,deep', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children)));
+	check('J 顶部显示指向的可执行名/子智能体', findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children).join(' | ') === 'cli · codex | subagent · spawn · deepseek-v4.1-flash', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children)));
+	// defaultReviewers 是 ['codex']，所以只有 codex 那行是勾着的。
+	const activeItems = findAll(element, (node) => node.props?.className === 'dsh-review-active-item');
+	check('J 顶部开关反映勾选状态', activeItems.length === 2 && activeItems[0].props.children[0].props.checked === true && activeItems[1].props.children[0].props.checked === false, JSON.stringify(activeItems.map((item) => item.props.children[0].props.checked)));
 	check('J 已勾选时不显示告警', findAll(element, (node) => node.props?.className === 'dsh-review-invalid').length === 0);
 	// 评审者定义区：行编辑器 + 增删都在
 	check('J 每行评审者有删除按钮', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length === 2, String(findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length));
@@ -1361,9 +1123,9 @@ function findAll(node, predicate) {
 	check('J 展开后有四个高级子分组', findAll(element, (node) => node.props?.className === 'dsh-review-subgroup').length === I.ADVANCED_GROUPS.length, String(findAll(element, (node) => node.props?.className === 'dsh-review-subgroup').length));
 	const switches = findAll(element, (node) => node.type === 'Switch');
 	// 4 个布尔字段 + 顶部列表 2 个 + 评审者行内 2 个 + 模式的合并开关 1 个
-	check('J 展开后开关数量（字段 4 + 顶部 2 + 行内 2 + 合并 1）', switches.length === 4 + 2 + 2 + 1, String(switches.length));
-	const discoverHolder = findAll(element, (node) => node.props?.className === 'dsh-review-field').find((node) => findAll(node, (child) => child.props?.children === 'discoverEnabled').length > 0);
-	check('J 推断生效的开关显示为开', findAll(discoverHolder, (node) => node.type === 'Switch')[0]?.props?.checked === true, JSON.stringify(findAll(discoverHolder, (node) => node.type === 'Switch').map((n) => n.props.checked)));
+	check('J 展开后开关数量（字段 1 + 顶部 2 + 行内 2）', switches.length === 1 + 2 + 2, String(switches.length));
+	const switchHolder = findAll(element, (node) => node.props?.className === 'dsh-review-field').find((node) => findAll(node, (child) => child.props?.children === 'injectPolicy').length > 0);
+	check('J 高级里的开关反映取值', findAll(switchHolder, (node) => node.type === 'Switch')[0]?.props?.checked === true, JSON.stringify(findAll(switchHolder, (node) => node.type === 'Switch').map((n) => n.props.checked)));
 	check('J 展开后有「添加模式」', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'addMode').length === 1);
 	check('J 展开后下拉与分段控件齐备', findAll(element, (node) => node.type === 'Menu').length >= 4 && findAll(element, (node) => node.type === 'SegmentedControl').length >= 4, `${findAll(element, (node) => node.type === 'Menu').length}/${findAll(element, (node) => node.type === 'SegmentedControl').length}`);
 	void bundlePrimitives;
@@ -1652,13 +1414,12 @@ console.log('\nK. GUI 配置的宿主半边');
 	} else {
 		console.log(`  ok   K 解析到 schemastery，Config 已生成`);
 		const Config = schema.Config;
-		const config = { agents: [{ preset: 'codex' }], modes: { deep: { strength: 'deep' } }, waitMs: 60000, discover: { providers: ['bailian'] }, 未知键: '保留' };
+		const config = { agents: [{ preset: 'codex' }], modes: { deep: { strength: 'deep' } }, waitMs: 60000, 未知键: '保留' };
 		const resolved = Config(config);
 		check('K schema 接受部分配置（缺省字段不报错）', resolved !== undefined);
 		check('K 未声明的键不被丢弃', schema.unwrapConfig(resolved).未知键 === '保留' && Array.isArray(schema.unwrapConfig(resolved).agents), JSON.stringify(Object.keys(schema.unwrapConfig(resolved))));
 		check('K 声明的字段是 volatile 盒子', schema.isVolatileBox(resolved.waitMs) === true, typeof resolved.waitMs);
-		check('K 声明的嵌套叶子也是盒子', schema.isVolatileBox(resolved.discover?.providers) === true, typeof resolved.discover?.providers);
-		check('K 盒子取回原始值', resolved.waitMs.get() === 60000 && JSON.stringify(resolved.discover.providers.get()) === JSON.stringify(['bailian']));
+		check('K 盒子取回原始值', resolved.waitMs.get() === 60000);
 		check('K reviewers/modes 原样透传', JSON.stringify(schema.unwrapConfig(resolved).modes) === JSON.stringify({ deep: { strength: 'deep' } }));
 		// 最关键的一条：声明 schema 之后，配置归一化的结果与不声明时完全一致。
 		const viaSchema = resolveSettings(schema.unwrapConfig(resolved));
@@ -1667,7 +1428,7 @@ console.log('\nK. GUI 配置的宿主半边');
 		// GUI 写入的值同样走这条路
 		// GUI 写入的值同样走这条路；被选中的 id 必须真的存在（关掉 adHoc 时未知 id 会被过滤并告警）。
 		const edited = resolveSettings(schema.unwrapConfig(Config({ agents: [{ preset: 'codex' }], defaultReviewers: ['codex'], discover: { adHoc: false } })));
-		check('K GUI 写入后归一化生效', edited.defaultReviewers.join(',') === 'codex' && edited.discover.adHoc === false, JSON.stringify({ defaultReviewers: edited.defaultReviewers, adHoc: edited.discover.adHoc }));
+		check('K GUI 写入后归一化生效', edited.defaultReviewers.join(',') === 'codex', JSON.stringify(edited.defaultReviewers));
 
 		// ── 默认值：只给「中性」的键加，且数值必须与插件 DEFAULTS 一致 ──
 		const { DEFAULTS } = await import(new URL('./lib/settings.js', import.meta.url).href);
@@ -1686,26 +1447,14 @@ console.log('\nK. GUI 配置的宿主半边');
 			maxFileDiffChars: DEFAULTS.maxFileDiffChars,
 			maxUntrackedFileChars: DEFAULTS.maxUntrackedFileChars,
 			maxArgBytes: DEFAULTS.maxArgBytes,
-			'discover.include': DEFAULTS.discover.include,
-			'discover.exclude': DEFAULTS.discover.exclude,
-			'discover.label': DEFAULTS.discover.label,
-			'discover.inDefault': DEFAULTS.discover.inDefault,
-			'discover.adHoc': DEFAULTS.discover.adHoc,
 		};
 		const drifted = Object.entries(shared).filter(([path, expected]) => {
 			const actual = meta(path.split('.')).default;
 			return JSON.stringify(actual) !== JSON.stringify(expected);
 		});
 		check('K schema 默认值与插件 DEFAULTS 一致', drifted.length === 0, JSON.stringify(drifted.map(([path, expected]) => `${path}: schema=${JSON.stringify(meta(path.split('.')).default)} defaults=${JSON.stringify(expected)}`)));
-		// 上了 GUI 之后数组字段永远是 []（schemastery 的隐式默认），所以推断必须按行为验证：
-		// 写了 providers / include 就自动打开发现，纯修饰键不打开。
-		const enabledOf = (raw) => resolveSettings(schema.unwrapConfig(Config(raw))).discover.enabled;
-		check('K 写了 providers 就打开发现', enabledOf({ discover: { providers: ['bailian'] } }) === true);
-		check('K 只写修饰键不打开发现', enabledOf({ discover: { adHoc: false } }) === false && enabledOf({ discover: { exclude: ['x*'] } }) === false);
-		check('K 空 discover 不打开发现', enabledOf({}).discover === undefined && enabledOf({ discover: {} }) === false);
-		check('K 显式 enabled 优先', enabledOf({ discover: { enabled: true } }) === true);
 		// 表单打开时数值/开关字段应该有真实值可显示
-		check('K 数值与开关默认值可显示', meta(['waitMs']).default === 120000 && meta(['discover', 'adHoc']).default === true && meta(['language']).default === 'auto');
+		check('K 数值与开关默认值可显示', meta(['waitMs']).default === 120000 && meta(['injectPolicy']).default === false && meta(['language']).default === 'auto');
 		check('K 硬超时默认 0（不限制）', meta(['hardTimeoutMs']).default === 0);
 	}
 }

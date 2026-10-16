@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({
 		/** 自动保存的防抖时长（测试可改小，避免等 500ms）。 */
 		const AUTO = { delayMs: 500 };
 
-		const KINDS = ['cli', 'llm', 'subagent'];
+		const KINDS = ['cli', 'subagent'];
 		const CLI_PRESETS = ['codex', 'claude', 'gemini', 'opencode', 'cursor', 'custom'];
 		const STRENGTHS = ['light', 'standard', 'deep'];
 
@@ -52,7 +52,7 @@ window.__ModuleLoader__.load({
 			groupActive: '启用的评审者',
 			groupReviewers: '评审者定义',
 			groupAdvanced: '高级配置',
-			advancedHint: '模式、模型发现、语言与预算。默认收起，需要时再展开。',
+			advancedHint: '模式、语言与预算。默认收起，需要时再展开。',
 			expandSection: '展开',
 			collapseSection: '收起',
 			activeHint: '只列出「评审者定义」里启用的那些。勾上的会被 review 工具默认使用；也可以在调用时用 reviewers 参数临时指定别的。',
@@ -68,7 +68,6 @@ window.__ModuleLoader__.load({
 			defaultReviewersHint: '勾上的会被默认使用。',
 			groupBehavior: '评审行为',
 			groupModes: '评审模式',
-			groupDiscover: '模型发现',
 			groupBudget: '预算与超时',
 			defaultMode: '默认评审模式',
 			defaultModeHint: '不传 mode 时套用的模式。',
@@ -81,27 +80,25 @@ window.__ModuleLoader__.load({
 			reviewerId: 'id（工具参数里引用它）',
 			reviewerKind: '类型',
 			reviewerKindCli: 'CLI 智能体',
-			reviewerKindLlm: 'DSH 调模型',
 			reviewerKindSubagent: '子智能体',
+			reviewerKindRemoved: '这个类型已移除（原：',
 			reviewerPreset: 'CLI 预设',
 			reviewerExecutable: '可执行文件',
-			reviewerProvider: 'provider',
+			catalogLoading: '正在读取可用模型…',
+			catalogFailed: '模型目录读取失败，可以自己填 provider 与模型名。',
+			providerMissing: '（未选 provider）',
+			modelMissing: '（未选模型）',
 			reviewerModel: '模型',
+			reviewerProvider: 'provider',
 			reviewerLabel: '显示名（可选）',
 			reviewerEnabled: '启用',
 			reviewerAgentProvider: '子智能体的 provider',
 			reviewerAgentModel: '子智能体的模型',
-			providerMissing: 'provider 列表不可用',
-			modelMissing: '该 provider 没有模型',
-			catalogLoading: '正在读取宿主模型目录…',
-			catalogFailed: '宿主模型目录读取失败，下面的 provider / 模型请手动填写。',
 			noReviewers: '还没有评审者。先添加一个，或用下面的原始 JSON 直接写。',
 			addMode: '添加模式',
 			modeName: '模式名（工具参数 mode 用它）',
 			modeReviewers: '用哪些评审者',
 			modeReviewersHint: '一个都不勾 = 用上面选定的默认集合。',
-			modeSynthesize: '合并结论',
-			modeSynthesizeReviewer: '用哪个模型汇总',
 			modeWhen: '强制评审策略',
 			modeWhenHint: '只在「把评审策略写进系统提示词」打开时生效。',
 			modeWhenOff: '不设',
@@ -126,20 +123,6 @@ window.__ModuleLoader__.load({
 			maxUntrackedFileCharsHint: '每个未跟踪新文件读取正文的上限。',
 			maxArgBytes: 'argv 单参数字节上限',
 			maxArgBytesHint: '以 argv 收提示词的 CLI 评审者的单参数上限（Linux 约 128 KiB）。',
-			discoverEnabled: '自动展开模型',
-			discoverEnabledHint: '打开后把下面 provider 的模型自动纳入评审者，不必在上面一个个写。',
-			discoverProviders: '要展开的 provider',
-			discoverProvidersHint: '一个都不勾 = 全部已注册 provider。',
-			discoverInclude: '模型白名单（glob，逗号分隔）',
-			discoverIncludeHint: '例如 qwen*, glm*；留空表示不限。',
-			discoverExclude: '模型黑名单（glob，逗号分隔）',
-			discoverExcludeHint: '例如 *embedding*；既不会被展开，也不允许按需指名。',
-			discoverLabel: '标签模板',
-			discoverLabelHint: '支持 {provider} {providerName} {model} {name}。',
-			discoverInDefault: '发现的模型进默认集合',
-			discoverInDefaultHint: '关闭时它们只是「可用」，要显式指名才会用到。',
-			discoverAdHoc: '允许按需指名 provider/model',
-			discoverAdHocHint: '打开时工具参数可以直接写 bailian/kimi-k3 这类不在配置里的模型。',
 			autoIdle: '改动会自动保存',
 			autoPending: '有改动待保存…',
 			autoSaving: '正在保存…',
@@ -167,7 +150,7 @@ window.__ModuleLoader__.load({
 			groupActive: 'Enabled reviewers',
 			groupReviewers: 'Reviewer definitions',
 			groupAdvanced: 'Advanced settings',
-			advancedHint: 'Modes, model discovery, language, and budgets. Collapsed by default.',
+			advancedHint: 'Modes, language, and budgets. Collapsed by default.',
 			expandSection: 'Expand',
 			collapseSection: 'Collapse',
 			activeHint: 'Only reviewers that are enabled below are listed. Checked ones are used by default; a call may still name others with its reviewers argument.',
@@ -181,7 +164,6 @@ window.__ModuleLoader__.load({
 			defaultReviewersHint: 'Checked ones are used by default.',
 			groupBehavior: 'Review behaviour',
 			groupModes: 'Review modes',
-			groupDiscover: 'Model discovery',
 			groupBudget: 'Budgets and timeouts',
 			defaultMode: 'Default review mode',
 			defaultModeHint: 'Applied when a call omits mode.',
@@ -194,27 +176,25 @@ window.__ModuleLoader__.load({
 			reviewerId: 'id (referenced by tool arguments)',
 			reviewerKind: 'Kind',
 			reviewerKindCli: 'CLI agent',
-			reviewerKindLlm: 'DSH model call',
 			reviewerKindSubagent: 'Subagent',
+			reviewerKindRemoved: 'This kind was removed (was: ',
 			reviewerPreset: 'CLI preset',
 			reviewerExecutable: 'Executable',
-			reviewerProvider: 'Provider',
+			catalogLoading: 'Loading available models…',
+			catalogFailed: 'Could not read the model catalog; type the provider and model yourself.',
+			providerMissing: '(no provider selected)',
+			modelMissing: '(no model selected)',
 			reviewerModel: 'Model',
+			reviewerProvider: 'Provider',
 			reviewerLabel: 'Display name (optional)',
 			reviewerEnabled: 'Enabled',
 			reviewerAgentProvider: 'Subagent provider',
 			reviewerAgentModel: 'Subagent model',
-			providerMissing: 'Provider list unavailable',
-			modelMissing: 'No models for this provider',
-			catalogLoading: 'Reading the host model catalog…',
-			catalogFailed: 'The host model catalog could not be read; fill provider / model by hand below.',
 			noReviewers: 'No reviewers yet. Add one, or write them in the raw JSON below.',
 			addMode: 'Add mode',
 			modeName: 'Name (referenced by the tool’s mode argument)',
 			modeReviewers: 'Reviewers to use',
 			modeReviewersHint: 'None selected means the default set chosen above.',
-			modeSynthesize: 'Merge findings',
-			modeSynthesizeReviewer: 'Model that merges',
 			modeWhen: 'Mandatory-review policy',
 			modeWhenHint: 'Only takes effect while “write the review policy into the system prompt” is on.',
 			modeWhenOff: 'Unset',
@@ -239,20 +219,6 @@ window.__ModuleLoader__.load({
 			maxUntrackedFileCharsHint: 'Cap on the body read from each untracked new file.',
 			maxArgBytes: 'Single-argument byte cap',
 			maxArgBytesHint: 'Per-argument cap for CLI reviewers that receive the prompt via argv (Linux allows ~128 KiB).',
-			discoverEnabled: 'Expand models automatically',
-			discoverEnabledHint: 'Pulls the providers below into the reviewer set, so you need not list them as reviewers.',
-			discoverProviders: 'Providers to expand',
-			discoverProvidersHint: 'None selected means every registered provider.',
-			discoverInclude: 'Model allowlist (glob, comma separated)',
-			discoverIncludeHint: 'e.g. qwen*, glm*; empty means no limit.',
-			discoverExclude: 'Model denylist (glob, comma separated)',
-			discoverExcludeHint: 'e.g. *embedding*; never expanded and refused ad hoc.',
-			discoverLabel: 'Label template',
-			discoverLabelHint: 'Supports {provider} {providerName} {model} {name}.',
-			discoverInDefault: 'Discovered models join the default set',
-			discoverInDefaultHint: 'When off they stay available but are only used when named.',
-			discoverAdHoc: 'Allow naming provider/model ad hoc',
-			discoverAdHocHint: 'Lets a tool call name a model that is not in the config, e.g. bailian/kimi-k3.',
 			autoIdle: 'Changes are saved automatically',
 			autoPending: 'Unsaved changes…',
 			autoSaving: 'Saving…',
@@ -344,38 +310,22 @@ window.__ModuleLoader__.load({
 			return options;
 		}
 
-		/**
-		 * `discover.enabled` 的**生效值**：宿主侧「写了 providers / include 就打开发现」的推断
-		 * 在这里镜像一遍，否则开关会显示成「关」而实际是开的——同一个语义两边必须一致。
-		 * 显式写了 true/false 就听它的。
-		 */
-		function effectiveDiscoverEnabled(enabledText, providersText, includeText) {
-			const raw = String(enabledText ?? '').trim().toLowerCase();
-			if (raw === 'true' || ['1', 'yes', 'on', '是', '开'].includes(raw)) return true;
-			if (raw === 'false' || ['0', 'no', 'off', '否', '关'].includes(raw)) return false;
-			return splitList(providersText).length > 0 || splitList(includeText).length > 0;
-		}
-
 		/** 一行评审者「指向什么」的完整描述（tooltip 用，可能很长）。 */
 		function reviewerTargetFull(row) {
-			const kind = row.kind ?? 'cli';
-			if (kind === 'llm') return `${row.provider ?? '?'}/${row.model ?? '?'}`;
-			if (kind === 'subagent') return `${row.provider ?? 'spawn'}${typeof row.agentModel === 'string' && row.agentModel.length > 0 ? ` · ${row.agentModel}` : ''}`;
+			if ((row.kind ?? 'cli') === 'subagent') return `${row.provider ?? 'spawn'}${typeof row.agentModel === 'string' && row.agentModel.length > 0 ? ` · ${row.agentModel}` : ''}`;
 			return row.executable ?? row.preset ?? 'cli';
 		}
 
 		/**
 		 * 顶部列表里的短摘要：CLI 只留可执行文件名。
 		 *
-		 * 之前直接显示 `executable` 的绝对路径（`/Users/…/@openai/codex/bin/codex.js`），
-		 * 一行被撑满、还把开关和名字挤到左边——列表要能一眼扫过去，细节交给 tooltip。
+		 * 直接显示 `executable` 的绝对路径会把一行撑满、还把开关和名字挤到左边——
+		 * 列表要能一眼扫过去，细节交给 tooltip。
 		 */
 		function reviewerTarget(row) {
-			const kind = row.kind ?? 'cli';
-			if (kind === 'llm' || kind === 'subagent') return reviewerTargetFull(row);
+			if ((row.kind ?? 'cli') === 'subagent') return reviewerTargetFull(row);
 			const raw = reviewerTargetFull(row);
-			const base = raw.split('/').filter((part) => part.length > 0).pop() ?? raw;
-			return base;
+			return raw.split('/').filter((part) => part.length > 0).pop() ?? raw;
 		}
 
 		/**
@@ -417,11 +367,18 @@ window.__ModuleLoader__.load({
 			return preset === 'cursor' ? 'cursor-agent' : preset;
 		}
 
-		/** 新增评审者行：优先给出「能直接跑」的初值（有目录就给模型评审者）。 */
+		/**
+		 * 新增评审者行：优先给出「能直接跑」的初值。
+		 *
+		 * 有模型目录时给**子智能体**并指明 provider/模型（这是仅剩的「用 DSH 里配好的模型」的方式）；
+		 * 拿不到目录就退回 CLI 预设。
+		 */
 		function newReviewerRow(index, groups) {
 			const provider = groups?.[0];
 			const model = provider?.models?.[0];
-			if (provider !== undefined && model !== undefined) return { id: `reviewer-${index}`, kind: 'llm', provider: provider.id, model: model.id };
+			if (provider !== undefined && model !== undefined) {
+				return { id: `reviewer-${index}`, kind: 'subagent', provider: 'spawn', agentProvider: provider.id, agentModel: model.id };
+			}
 			return { id: `reviewer-${index}`, kind: 'cli', preset: 'codex', executable: 'codex' };
 		}
 
@@ -497,9 +454,11 @@ window.__ModuleLoader__.load({
 						return undefined;
 					}
 					if (!Array.isArray(parsed)) return undefined;
-					const ok = parsed.every(
-						(row) => row !== null && typeof row === 'object' && !Array.isArray(row) && typeof row.id === 'string' && row.id.trim().length > 0 && (row.kind === undefined || KINDS.includes(row.kind)),
-					);
+					// 只硬校验「是对象且有 id」。kind 不在这里卡死：老配置可能留着已移除的
+					// llm 行，如果这里判非法，整张设置表都会变 invalid 而**什么都存不下去**
+					// （form 级 invalid → 保存被拦）。改成原样带过：行内会标出「类型已移除」，
+					// 宿主侧也会给出告警，用户看得见、改得动。
+					const ok = parsed.every((row) => row !== null && typeof row === 'object' && !Array.isArray(row) && typeof row.id === 'string' && row.id.trim().length > 0);
 					return ok ? { kind: 'set', value: parsed } : undefined;
 				},
 			};
@@ -538,13 +497,6 @@ window.__ModuleLoader__.load({
 			{ path: 'injectPolicy', spec: boolField('injectPolicy'), control: 'switch', section: 'advanced', group: 'behavior', label: 'injectPolicy', hint: 'injectPolicyHint' },
 			{ path: 'defaultMode', spec: choiceField('defaultMode', []), control: 'mode', section: 'advanced', group: 'behavior', label: 'defaultMode', hint: 'defaultModeHint' },
 			{ path: 'modes', spec: modesField('modes'), control: 'modes', section: 'advanced', group: 'modes', label: 'groupModes' },
-			{ path: 'discover.enabled', spec: boolField('discover.enabled'), control: 'switch', section: 'advanced', group: 'discover', label: 'discoverEnabled', hint: 'discoverEnabledHint' },
-			{ path: 'discover.providers', spec: listField('discover.providers'), control: 'providerChecklist', section: 'advanced', group: 'discover', label: 'discoverProviders', hint: 'discoverProvidersHint' },
-			{ path: 'discover.include', spec: listField('discover.include'), control: 'text', section: 'advanced', group: 'discover', label: 'discoverInclude', hint: 'discoverIncludeHint' },
-			{ path: 'discover.exclude', spec: listField('discover.exclude'), control: 'text', section: 'advanced', group: 'discover', label: 'discoverExclude', hint: 'discoverExcludeHint' },
-			{ path: 'discover.label', spec: P.settingsTextField('discover.label'), control: 'text', section: 'advanced', group: 'discover', label: 'discoverLabel', hint: 'discoverLabelHint' },
-			{ path: 'discover.inDefault', spec: boolField('discover.inDefault'), control: 'switch', section: 'advanced', group: 'discover', label: 'discoverInDefault', hint: 'discoverInDefaultHint' },
-			{ path: 'discover.adHoc', spec: boolField('discover.adHoc'), control: 'switch', section: 'advanced', group: 'discover', label: 'discoverAdHoc', hint: 'discoverAdHocHint' },
 			{ path: 'waitMs', spec: numberField('waitMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'waitMs', hint: 'waitMsHint' },
 			{ path: 'hardTimeoutMs', spec: numberField('hardTimeoutMs', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'hardTimeoutMs', hint: 'hardTimeoutMsHint' },
 			{ path: 'maxResultChars', spec: numberField('maxResultChars', 0), control: 'number', numeric: true, section: 'advanced', group: 'budget', label: 'maxResultChars', hint: 'maxResultCharsHint' },
@@ -558,7 +510,6 @@ window.__ModuleLoader__.load({
 		const ADVANCED_GROUPS = [
 			{ key: 'behavior', label: 'groupBehavior' },
 			{ key: 'modes', label: 'groupModes' },
-			{ key: 'discover', label: 'groupDiscover' },
 			{ key: 'budget', label: 'groupBudget' },
 		];
 
@@ -694,31 +645,12 @@ window.__ModuleLoader__.load({
 		function ReviewerRow(props) {
 			const { t, row, index, providerOptions, modelsFor, disabled } = props;
 			const kind = row.kind ?? 'cli';
+			const removedKind = !KINDS.includes(kind);
 			const update = (patch) => props.onChange({ ...row, ...patch });
 			const fields = [];
-			if (kind === 'llm') {
-				// 下拉本身不带标题，用和单值字段一样的「标签 + 控件」外壳，免得两个按钮不知道各是什么。
+			if (kind === 'subagent') {
 				fields.push(
-					labelled('provider', t('reviewerProvider'), h(Dropdown, {
-						id: `reviewer-${index}-provider`,
-						value: row.provider ?? '',
-						options: selectOptions(providerOptions, row.provider),
-						placeholder: t('providerMissing'),
-						disabled,
-						onChange: (value) => update({ provider: value, model: modelsFor(value)[0]?.value ?? row.model }),
-					})),
-					labelled('model', t('reviewerModel'), h(Dropdown, {
-						id: `reviewer-${index}-model`,
-						value: row.model ?? '',
-						options: selectOptions(modelsFor(row.provider), row.model),
-						placeholder: t('modelMissing'),
-						disabled,
-						onChange: (value) => update({ model: value }),
-					})),
-				);
-			} else if (kind === 'subagent') {
-				fields.push(
-					labelled('provider', t('reviewerKindSubagent'), h(P.Input, { value: row.provider ?? '', placeholder: 'spawn', disabled, onChange: (event) => update({ provider: event.target.value }) })),
+					labelled('provider', t('reviewerProvider'), h(P.Input, { value: row.provider ?? '', placeholder: 'spawn', disabled, onChange: (event) => update({ provider: event.target.value }) })),
 					labelled('agentProvider', t('reviewerAgentProvider'), h(Dropdown, {
 						id: `reviewer-${index}-agent-provider`,
 						value: row.agentProvider ?? '',
@@ -760,6 +692,7 @@ window.__ModuleLoader__.load({
 					h(P.Switch, { checked: row.enabled !== false, label: t('reviewerEnabled'), disabled, onChange: (next) => update({ enabled: next }) }),
 					h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: () => props.onRemove() }, t('remove')),
 				),
+				removedKind ? h('p', { className: 'dsh-review-invalid' }, `${t('reviewerKindRemoved')}${kind}`) : null,
 				h(
 					'div',
 					{ className: 'dsh-review-card-kind' },
@@ -771,7 +704,6 @@ window.__ModuleLoader__.load({
 						disabled,
 						options: [
 							{ value: 'cli', label: t('reviewerKindCli') },
-							{ value: 'llm', label: t('reviewerKindLlm') },
 							{ value: 'subagent', label: t('reviewerKindSubagent') },
 						],
 						onChange: (value) => update({ kind: value }),
@@ -826,7 +758,7 @@ window.__ModuleLoader__.load({
 
 		/** 一行模式。 */
 		function ModeRow(props) {
-			const { t, row, index, reviewerOptions, llmOptions, disabled } = props;
+			const { t, row, index, reviewerOptions, disabled } = props;
 			const body = row.body;
 			const update = (patch) => props.onChange({ name: row.name, body: { ...body, ...patch } });
 			const replace = (next) => props.onChange({ name: row.name, body: cleanupModeBody(next) });
@@ -887,23 +819,6 @@ window.__ModuleLoader__.load({
 						}),
 					),
 					inline(
-						'synthesize',
-						t('modeSynthesize'),
-						h(P.Switch, { checked: body.synthesize === true, label: '', disabled, onChange: (next) => replace({ ...body, synthesize: next ? true : undefined }) }),
-					),
-					inline(
-						'synthesizeReviewer',
-						t('modeSynthesizeReviewer'),
-						h(Dropdown, {
-							id: `mode-${index}-synthesize-reviewer`,
-							value: body.synthesizeReviewer ?? '',
-							options: selectOptions(llmOptions, body.synthesizeReviewer),
-							placeholder: '—',
-							disabled,
-							onChange: (value) => replace({ ...body, synthesizeReviewer: value }),
-						}),
-					),
-					inline(
 						'minChangedLines',
 						t('modeMinLines'),
 						h(P.Input, {
@@ -948,7 +863,6 @@ window.__ModuleLoader__.load({
 						row,
 						index,
 						reviewerOptions: props.reviewerOptions,
-						llmOptions: props.llmOptions,
 						disabled: props.disabled,
 						onChange: (next) => props.onChange(rows.map((entry, position) => (position === index ? next : entry))),
 						onRemove: () => props.onChange(rows.filter((entry, position) => position !== index)),
@@ -986,10 +900,7 @@ window.__ModuleLoader__.load({
 				});
 
 			if (field.control === 'switch') {
-				const checked = props.switchChecked === undefined ? text === 'true' : props.switchChecked;
-				const inferred = props.switchChecked === true && text !== 'true';
-				const hint = inferred ? `${hintKey === undefined ? '' : t(hintKey)}（当前因为写了 provider 或白名单而生效）` : undefined;
-				return shell(h(P.Switch, { checked, label: '', disabled, onChange: (next) => actions.edit(field.path, next ? 'true' : 'false') }), hint);
+				return shell(h(P.Switch, { checked: text === 'true', label: '', disabled, onChange: (next) => actions.edit(field.path, next ? 'true' : 'false') }));
 			}
 			if (field.control === 'segmented') {
 				return shell(
@@ -1046,25 +957,6 @@ window.__ModuleLoader__.load({
 					}),
 				);
 			}
-			if (field.control === 'providerChecklist') {
-				const values = splitList(text);
-				const options = catalogGroups(catalog).map((group) => ({ value: group.id, label: group.name }));
-				for (const value of values) if (!options.some((option) => option.value === value)) options.push({ value, label: value });
-				if (options.length === 0) {
-					const hint = catalog?.status === 'error' ? t('catalogFailed') : t('catalogLoading');
-					return shell(h(P.Input, { id, value: text, disabled, onChange: (event) => actions.edit(field.path, event.target.value) }), hint);
-				}
-				return shell(
-					h(MultiSelect, {
-						id,
-						values,
-						options,
-						disabled,
-						emptyLabel: t('discoverProvidersHint'),
-						onChange: (next) => actions.edit(field.path, next.join(', ')),
-					}),
-				);
-			}
 			// number / text：官方单值控件（自带校验与覆盖提示）。
 			return h(P.SettingsValueField, {
 				id,
@@ -1098,10 +990,6 @@ window.__ModuleLoader__.load({
 			const reviewerIds = reviewerRows(reviewersText)
 				.map((row) => ({ value: row.id, label: typeof row.label === 'string' && row.label.length > 0 ? row.label : row.id }))
 				.filter((option) => typeof option.value === 'string' && option.value.length > 0);
-			const llmIds = reviewerRows(reviewersText)
-				.filter((row) => (row.kind ?? 'cli') === 'llm')
-				.map((row) => ({ value: row.id, label: typeof row.label === 'string' && row.label.length > 0 ? row.label : row.id }))
-				.filter((option) => typeof option.value === 'string' && option.value.length > 0);
 			return h(
 				'div',
 				{ className: 'dsh-review-structured' },
@@ -1118,7 +1006,7 @@ window.__ModuleLoader__.load({
 					{ className: 'dsh-review-structured-body' },
 					isReviewers
 						? h(ReviewersEditor, { t, rows, groups, providerOptions, modelsFor, disabled, onChange })
-						: h(ModesEditor, { t, rows, reviewerOptions: reviewerIds, llmOptions: llmIds, disabled, onChange }),
+						: h(ModesEditor, { t, rows, reviewerOptions: reviewerIds, disabled, onChange }),
 				),
 				showJson
 					? h(
@@ -1526,8 +1414,6 @@ h5.dsh-review-subgroup-title {
 			const disabled = !view.shell.writable || view.shell.saving;
 			const reviewersText = view.fields.reviewers?.text ?? '';
 			const modesText = view.fields.modes?.text ?? '';
-			// 只给 discover.enabled 用：把宿主的推断镜像成开关的真实状态。
-			const discoverEnabledEffective = effectiveDiscoverEnabled(view.fields['discover.enabled']?.text, view.fields['discover.providers']?.text, view.fields['discover.include']?.text);
 			const renderField = (field) =>
 				field.control === 'reviewers' || field.control === 'modes'
 					? h(StructuredEditor, { key: field.path, t, field, state: view.fields[field.path], actions, disabled, catalog, reviewersText })
@@ -1541,7 +1427,6 @@ h5.dsh-review-subgroup-title {
 							catalog,
 							reviewersText,
 							modesText,
-							switchChecked: field.path === 'discover.enabled' ? discoverEnabledEffective : undefined,
 						});
 			return h(
 				P.SettingsForm,
@@ -1921,7 +1806,6 @@ h5.dsh-review-subgroup-title {
 			modeRows,
 			serializeModes,
 			cleanupModeBody,
-			effectiveDiscoverEnabled,
 			STYLES,
 			injectStyles,
 			AUTO,

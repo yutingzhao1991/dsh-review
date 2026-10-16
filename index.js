@@ -24,12 +24,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { collectChanges, describeCall, describeTarget } from './lib/changes.js';
-import { resolveReviewerSelection } from './lib/discovery.js';
-import { buildBrief, buildNativePrompt, buildPolicyText, buildSynthesisPrompt, flattenBrief } from './lib/prompt.js';
+import { buildBrief, buildNativePrompt, buildPolicyText, flattenBrief } from './lib/prompt.js';
 import { composeReport, truncateText } from './lib/report.js';
 import { clampForArgv, runReviewer } from './lib/reviewers.js';
 import { Config, schemaAvailable, unwrapConfig } from './lib/schema.js';
-import { needsPacket, resolveMode, resolveSettings } from './lib/settings.js';
+import { needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
 
 /** 加载器诊断用的插件名；`cordis.patch.yml` 里的 id 是 `review`。 */
 export const name = 'review';
@@ -75,33 +74,18 @@ function safeFileName(id, index) {
 /* ────────────────────────────── 工具元信息 ────────────────────────────── */
 
 /** 工具描述从配置生成：模型能直接看到「有哪些评审者、哪些模式」。 */
-function buildToolDescription(ctx, settings) {
+function buildToolDescription(settings) {
 	const lines = ['用外部评审者评审代码改动，返回它们的评审结论（findings、风险、建议）。', ''];
 
 	const enabled = settings.reviewers.filter((reviewer) => reviewer.enabled);
 	lines.push('可用评审者：');
 	if (enabled.length === 0) {
-		lines.push('- （没有配置任何评审者：请先在插件 config 里配置 agents / models / reviewers）');
+		lines.push('- （没有配置任何评审者：请先在插件 config 里配置 agents / reviewers，即 CLI 智能体或子智能体）');
 	} else {
 		for (const reviewer of enabled) {
-			const target = reviewer.kind === 'llm' ? `${reviewer.provider}/${reviewer.model}` : reviewer.kind === 'cli' ? `可执行 ${reviewer.executable}` : `provider ${reviewer.provider}`;
+			const target = reviewer.kind === 'cli' ? `可执行 ${reviewer.executable}` : `子智能体 ${reviewer.provider}`;
 			lines.push(`- \`${reviewer.id}\`（${reviewer.kind}，${reviewer.label}）：${target}`);
 		}
-	}
-
-	// 模型来自 DSH 自己的 provider 配置：把「还能直接指名什么」讲清楚，但不在这里
-	// 枚举具体模型——那样会随 DSH 配置漂移，而且工具描述是注册时固定的一份文本。
-	const discover = settings.discover;
-	if (discover.adHoc) {
-		const registered = listRegisteredProviders(ctx);
-		lines.push(
-			'',
-			`除上面的 id，\`reviewers\` 也可以直接写 \`provider/model\`，用 DSH 里已注册的任意模型（模型与密钥都在 DSH 的 provider 配置里，插件不复制）。${registered.length > 0 ? `当前已注册的 provider：${registered.join('、')}。` : ''}`,
-		);
-	}
-	if (discover.enabled) {
-		const scope = discover.providers === undefined ? '所有已注册 provider' : discover.providers.join('、');
-		lines.push(`\`discover\` 已打开：每次调用会把 ${scope} 的模型自动纳入评审者集合${discover.inDefault ? '（并进入默认集合）' : '（要显式指名才会用到）'}${discover.exclude.length > 0 ? `；已排除 ${discover.exclude.join('、')}` : ''}。`);
 	}
 
 	const modes = Object.values(settings.modes);
@@ -110,7 +94,6 @@ function buildToolDescription(ctx, settings) {
 		for (const mode of modes) {
 			const bits = [mode.strength];
 			if (mode.reviewers !== undefined) bits.push(`评审者 ${mode.reviewers.join('/')}`);
-			if (mode.synthesize) bits.push('合并结论');
 			lines.push(`- \`${mode.name}\`（${bits.join('，')}）${mode.description === undefined ? '' : `：${mode.description}`}`);
 		}
 	} else {
@@ -131,25 +114,13 @@ function buildToolDescription(ctx, settings) {
 	return lines.join('\n');
 }
 
-/** 注册时能问到的 provider 列表（可能因为 llm 还没挂载而为空，空就只省略这一句）。 */
-function listRegisteredProviders(ctx) {
-	try {
-		const llm = typeof ctx.get === 'function' ? ctx.get('llm') : ctx.llm;
-		if (llm === undefined || typeof llm.listProviders !== 'function') return [];
-		const providers = llm.listProviders();
-		return Array.isArray(providers) ? providers.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0) : [];
-	} catch {
-		return [];
-	}
-}
-
 function buildParameters(settings) {
 	const enabled = settings.reviewers.filter((reviewer) => reviewer.enabled);
 	const reviewersHint =
 		settings.defaultReviewers !== undefined && settings.defaultReviewers.length > 0
 			? `不传则用默认集合：${settings.defaultReviewers.join(', ')}。`
 			: enabled.length > 0
-				? '不传则用全部启用的评审者。'
+				? '不传则用 defaultReviewers；一个都没启用时调用会直接报错。'
 				: '当前没有配置评审者。';
 	const modeHint = Object.keys(settings.modes).length > 0 ? `可用：${Object.keys(settings.modes).join(', ')}。不传用默认模式。` : '当前没有配置模式。';
 	return {
@@ -259,16 +230,6 @@ async function stopJob(ctx, jobId, owner, reason) {
 	}
 }
 
-/** 汇总用的评审者：模式指名的 llm 评审者 → 本次选中的第一个 llm 评审者 → 放弃。 */
-function pickSynthesizer(settings, mode, reviewers) {
-	const explicit = mode.synthesizeReviewer;
-	if (explicit !== undefined) {
-		const found = settings.reviewers.find((reviewer) => reviewer.id === explicit && reviewer.kind === 'llm' && reviewer.enabled);
-		if (found !== undefined) return found;
-	}
-	return reviewers.find((reviewer) => reviewer.kind === 'llm');
-}
-
 /* ────────────────────────────── 插件入口 ────────────────────────────── */
 
 export function apply(ctx, config) {
@@ -276,7 +237,7 @@ export function apply(ctx, config) {
 	const rawConfig = config;
 	const snapshot = () => resolveSettings(unwrapConfig(rawConfig));
 	const settings = snapshot();
-	const toolDescription = buildToolDescription(ctx, settings);
+	const toolDescription = buildToolDescription(settings);
 	const parameters = buildParameters(settings);
 
 	const disposeTool = ctx.tools.register({
@@ -300,9 +261,8 @@ export function apply(ctx, config) {
 			const mode = resolveMode(live, target.mode);
 			const cwd = resolveCwd(exec);
 			assertDirectory(cwd);
-			// 评审者在这里解析（而不是加载时定死）：discover 会现场问 ctx.llm 要模型列表，
-			// 所以 DSH 那边加/删模型立刻生效；解析失败就地报错，模型能马上改参数重试。
-			const { reviewers, notes: discoveryNotes } = await resolveReviewerSelection(ctx, live, mode, target.reviewers, exec.signal);
+			// 解析失败就地报错，模型能马上改参数重试。
+			const reviewers = selectReviewers(live, mode, target.reviewers);
 			const owner = exec.agent?.id;
 			const ids = reviewers.map((reviewer) => reviewer.id);
 			const label = describeCall(reviewers, target);
@@ -343,13 +303,13 @@ export function apply(ctx, config) {
 							const scopeGiven = target.base.length > 0 || target.commit.length > 0;
 
 							// 只进报告脚注、不进评审者提示词：这些是给读结论的人看的。
-							const reportNotes = [...changes.notes, ...discoveryNotes];
+							const reportNotes = [...changes.notes];
 							/** 提示词被 argv 字节闸截断的评审者 id。 */
 							const argvTruncated = [];
 							const rangeFirst = reviewers.filter((reviewer) => reviewer.promptReplacesRange);
 							if (scopeGiven && nativePrompt !== undefined && rangeFirst.length > 0) {
 								reportNotes.push(
-									`${rangeFirst.map((reviewer) => reviewer.id).join('、')}：因为指定了 base/commit，模式的提示词没有传递——该 CLI 的 PROMPT 与范围开关互斥，而范围优先。需要「范围 + 关注点」请改用 llm / subagent 评审者。`,
+									`${rangeFirst.map((reviewer) => reviewer.id).join('、')}：因为指定了 base/commit，模式的提示词没有传递——该 CLI 的 PROMPT 与范围开关互斥，而范围优先。需要「范围 + 关注点」请改用 subagent 评审者，或把关注点写进自定义 CLI 的命令模板。`,
 								);
 							}
 
@@ -386,33 +346,20 @@ export function apply(ctx, config) {
 
 							if (argvTruncated.length > 0) {
 								reportNotes.push(
-									`${[...new Set(argvTruncated)].join('、')}：提示词超过单参数 ${live.maxArgBytes} 字节上限，diff 被截断后才交给 CLI。这些评审者看到的材料比其他人少——「没有问题」不等于覆盖了全部改动；要看完整 diff 请调小 maxDiffChars 分批评审，或改用 llm / subagent 评审者。`,
+									`${[...new Set(argvTruncated)].join('、')}：提示词超过单参数 ${live.maxArgBytes} 字节上限，diff 被截断后才交给 CLI。这些评审者看到的材料比其他人少——「没有问题」不等于覆盖了全部改动；要看完整 diff 请调小 maxDiffChars 分批评审，或改用 subagent 评审者（它自己去读仓库，不受这个上限影响）。`,
 								);
-							}
-
-							// 可选的汇总：把多份结论合并、去重、标注共识。
-							let synthesis;
-							if (mode?.synthesize === true && outcomes.filter((outcome) => outcome.status === 'completed').length > 1) {
-								const synthesizer = pickSynthesizer(live, mode, reviewers);
-								if (synthesizer === undefined) {
-									synthesis = { status: 'failed', detail: '没有可用的 llm 评审者做汇总', text: '' };
-								} else {
-									const synthesisBrief = buildSynthesisPrompt({ settings: live, mode, target, outcomes });
-									const result = await runReviewer(ctx, { ...synthesizer, id: `${synthesizer.id}:synthesis`, label: `${synthesizer.label}（汇总）`, source: 'config' }, { cwd, target, brief: synthesisBrief, settings: live, agent: exec.agent, signal: controller.signal, reportPath });
-									synthesis = { status: result.status, detail: result.detail, text: result.text };
-								}
 							}
 
 							const completed = outcomes.filter((outcome) => outcome.status === 'completed').length;
 							const status = completed > 0 ? 'completed' : 'failed';
 							const detail = `${completed}/${outcomes.length} 个评审者完成`;
 
-							const draft = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, notes: reportNotes, warnings: live.warnings });
+							const draft = composeReport({ reviewers, outcomes, changes, mode, target, notes: reportNotes, warnings: live.warnings });
 							const truncation = truncateText(draft, live.maxResultChars);
 							let shown = draft;
 							if (truncation.truncated) {
 								// 只有截断时才需要把全文留在盘上：结果里给出了路径，不能删。
-								const full = composeReport({ reviewers, outcomes, changes, mode, target, synthesis, reportPath, truncated: true, notes: reportNotes, warnings: live.warnings });
+								const full = composeReport({ reviewers, outcomes, changes, mode, target, reportPath, truncated: true, notes: reportNotes, warnings: live.warnings });
 								await writeFile(reportPath, full, 'utf8').catch(() => undefined);
 								shown = `${truncateText(full, live.maxResultChars).text}\n\n[报告已截断；完整报告：${reportPath}]`;
 							} else {
