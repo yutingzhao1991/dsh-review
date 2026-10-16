@@ -6,8 +6,8 @@
 [![dsh plugin](https://img.shields.io/badge/dsh-plugin-4c6ef5.svg)](https://github.com/deepseek-ai/deepseek-harness)
 [![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#安装)
 
-代码评审不该绑死在一家身上。把改动交给一个 CLI 编码智能体、交给一个你已经配好的模型，
-或者交给一个能自己翻文件的只读智能体——最后读一份合并好的结论。
+代码评审不该绑死在一家身上。把改动交给一个 CLI 编码智能体，或交给一个跑 DSH 配置里模型的
+子智能体——最后读一份合并好的结论。
 
 ![配置页](docs/images/gui-zh.png)
 
@@ -63,6 +63,9 @@ CLI 预设：`codex`、`claude`、`gemini`、`opencode`、`cursor`，或 `custom
 
 有一点值得知道：`subagent` 不写 `agentModel` 就会继承父会话的模型，所以它**不自动等于**「第二
 意见」——想要独立意见就显式指定模型。
+
+子智能体默认带两道保险：**不给它 `review` 工具**（免得评审者再起评审者），以及 **30 分钟墙钟上限**
+（`timeoutMs` 按评审者覆盖；`hardTimeoutMs` 仍然限制整次调用）。运行期间会报进度，跑得久也不像卡住。
 
 这里刻意**没有**「把 diff 丢给一个裸模型」这种类型：能自己打开仓库的评审者，比只看到手头材料的
 更有价值。
@@ -124,7 +127,7 @@ config:
 | `injectPolicy` | `false` | 把各模式的 `when` 规则写进系统提示词 |
 | `agents` / `reviewers` | `[]` | 定义 CLI 与子智能体评审者（`agents` 是预设简写，`reviewers` 是完整写法） |
 | `modes` | `{}` | 命名评审模式 |
-| `waitMs` | `120000` | 调用阻塞多久后交回 job id；`0` = 立即交回 |
+| `waitMs` | `0` | 调用阻塞多久后交回 job id。`0` = 立即交回（评审要跑几分钟，等着基本是白等） |
 | `hardTimeoutMs` | `0` | 墙钟上限；`0` = 不限制——什么时候停由你决定 |
 | `maxResultChars` | `80000` | 报告上限；超出会截断并给出完整报告路径 |
 | `maxDiffChars` | `160000` | 需要 diff 的评审者能看到的变更正文上限 |

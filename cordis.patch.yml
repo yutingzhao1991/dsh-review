@@ -9,13 +9,12 @@
 #       agents:
 #         - preset: codex
 #           model: gpt-5.6-sol
-#       models:
-#         - provider: bailian
-#           model: qwen3.8-max
-#           label: Qwen3.8-Max
-#       # 或者干脆不抄模型：直接展开 DSH 里已配好的
-#       discover:
-#         providers: [ bailian ]
+#       reviewers:
+#         - id: deep-dive
+#           kind: subagent
+#           provider: spawn            # 子智能体 provider
+#           agentProvider: bailian     # 模型来自 DSH 自己的配置
+#           agentModel: deepseek-v4.1-flash
 #
 # 覆盖是整块替换 config（不做深合并），未写的键由插件内置默认值补齐。
 - insert:

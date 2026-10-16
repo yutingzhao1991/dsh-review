@@ -76,9 +76,12 @@ function makeHarness(options = {}) {
 		const reportPath = reportFlag >= 0 ? spec.argv[reportFlag + 1] : undefined;
 		if (reportPath !== undefined && options.report !== undefined) writeFileSync(reportPath, options.report);
 		const reader = (text) => ({ readFrom: () => ({ text, lossy: false, nextOffset: text.length, spillPath: `/spill/${text.length}` }) });
+		// spawnDelayMs：把评审者做成「慢的」，用来看心跳/超时这类跟时间有关的行为。
+		const delay = options.spawnDelayMs ?? 0;
+		const done = delay > 0 ? new Promise((resolve) => setTimeout(() => resolve({ exitCode, signal: null }), delay)) : Promise.resolve({ exitCode, signal: null });
 		return {
 			collected: { stdout: reader(stdout), stderr: reader(stderr) },
-			done: Promise.resolve({ exitCode, signal: null }),
+			done,
 			terminate() {},
 		};
 	};
@@ -119,6 +122,7 @@ function makeHarness(options = {}) {
 					},
 					updateProgress(line) {
 						record.progress = line;
+						(record.progressLog ??= []).push(line);
 					},
 				};
 				const hooks = spec.run(handle);
@@ -163,6 +167,9 @@ function makeHarness(options = {}) {
  */
 async function loadPlugin({ plugin, harness = {}, services } = {}) {
 	const config = plugin === undefined ? {} : { ...plugin };
+	// 生产默认 waitMs = 0（立即交回 job id，交给 job 机制通知）。用例大多想验证「等它跑完」
+	// 这条路径，所以这里显式给足等待时间；waitMs 本身的行为另有专门用例。
+	if (!('waitMs' in config)) config.waitMs = 60_000;
 	if (!('defaultReviewers' in config) && (config.agents !== undefined || config.models !== undefined || config.reviewers !== undefined)) {
 		const { resolveSettings } = await import(new URL('./lib/settings.js', import.meta.url).href);
 		const ids = resolveSettings(config).reviewers.filter((reviewer) => reviewer.enabled).map((reviewer) => reviewer.id);
@@ -257,10 +264,18 @@ console.log('\nA. 配置归一化');
 	check('A 调用方指定评审者最高优先', selectReviewers(settings, settings.modes.quick, ['codex']).map((r) => r.id).join(',') === 'codex');
 	await rejects('A 未知模式报错', () => resolveMode(settings, 'nope'));
 	await rejects('A 未知评审者报错', () => selectReviewers(settings, undefined, ['ghost']));
+	// 显式传空数组 = 不启用（不能静默落回默认集合），不传才用 mode / defaultReviewers。
+	await rejects('A 显式空数组报错', () => selectReviewers(settings, undefined, []));
 
 	// 超时默认不设：评审跑多久由调用方决定，插件不替它掐表。
 	check('A 硬超时默认不限制', resolveSettings({}).hardTimeoutMs === 0);
-	check('A 前台等待仍有默认值', resolveSettings({}).waitMs === 120000);
+	// 实测评审者要 2～20 分钟，任何「先等一小段」都是白等，所以默认立即交回 job id。
+	check('A 前台等待默认 0（立即交回）', resolveSettings({}).waitMs === 0, String(resolveSettings({}).waitMs));
+	check('A 子智能体默认有时间上限兜底', resolveSettings({ reviewers: [{ id: 's', kind: 'subagent' }] }).reviewers[0].timeoutMs === 1800000, String(resolveSettings({ reviewers: [{ id: 's', kind: 'subagent' }] }).reviewers[0].timeoutMs));
+	// 默认剔除 review 自己：否则「只读评审者」手里握着 review + 无预算 = 递归与成本炸弹。
+	check('A 子智能体默认不给 review 工具', JSON.stringify(resolveSettings({ reviewers: [{ id: 's', kind: 'subagent' }] }).reviewers[0].toolFilter) === JSON.stringify({ deny: ['review'] }));
+	check('A 显式 toolFilter 覆盖默认', JSON.stringify(resolveSettings({ reviewers: [{ id: 's', kind: 'subagent', toolFilter: { allow: ['read'] } }] }).reviewers[0].toolFilter) === JSON.stringify({ allow: ['read'] }));
+	check('A CLI 评审者不设 toolFilter', resolveSettings({ agents: [{ preset: 'codex' }] }).reviewers[0].toolFilter === undefined);
 	// 一个都不选 = 不启用：unset 与 [] 都不是「全部启用」。
 	check('A 未勾选时默认集合为空', resolveSettings({ agents: [{ preset: 'codex' }] }).defaultReviewers.length === 0);
 	{
@@ -312,10 +327,20 @@ console.log('\nC. CLI 评审者');
 	check('C kind=completed', value.kind === 'completed', JSON.stringify(value).slice(0, 160));
 	check('C 结论来自 --output-last-message 文件', value.report.includes('发现一个 P2 问题'));
 	check('C 报告含评审范围头', value.report.includes('## 评审范围') && value.report.includes('未提交的改动'));
-	check('C 报告含变更规模', value.report.includes('+10 / -2'), value.report.slice(0, 400));
+	// 未跟踪的 src/b.js 只有 1 行，也计入新增：否则「1 个文件，+0 / -0」看着像没改动。
+	check('C 报告含变更规模', value.report.includes('+11 / -2'), value.report.slice(0, 400));
+	check('C 未跟踪文件的行数计入新增', value.report.includes('已按 1 行新增计入规模'), value.report.slice(0, 500));
 	const argv = h.state.spawns.find((spec) => spec.argv[0] === '/fake/codex').argv;
-	check('C argv 前缀', JSON.stringify(argv.slice(0, 7)) === JSON.stringify(['/fake/codex', 'exec', 'review', '--uncommitted', '--ephemeral', '-m', 'gpt-x']), JSON.stringify(argv.slice(0, 8)));
+	// codex 的 CLI 不允许 PROMPT 与范围开关同时出现，而我们现在总会给它统一输出格式，
+	// 所以 `--uncommitted` 不再显式传递——codex 不带范围开关时的默认范围就是未提交改动，
+	// 与显式传该开关等价；显式 base/commit 时仍然保留范围开关（见 H 段用例）。
+	check('C argv 前缀', JSON.stringify(argv.slice(0, 6)) === JSON.stringify(['/fake/codex', 'exec', 'review', '--ephemeral', '-m', 'gpt-x']), JSON.stringify(argv.slice(0, 7)));
 	check('C argv 带 --output-last-message', argv.includes('--output-last-message'));
+	// 标题里不塞绝对路径
+	{
+		const heading = value.report.split('\n').find((line) => line.startsWith('###')) ?? '';
+		check('C 报告标题不塞绝对路径', heading.includes('（cli, codex') && !heading.includes('/'), heading);
+	}
 	check('C codex 不喂 diff（needsPacket=false）', !h.state.spawns.some((spec) => spec.argv.includes('--no-color') && spec.argv.includes('diff')), JSON.stringify(h.state.spawns.map((s) => s.argv.slice(0, 5))));
 	check('C ring 里就是报告', h.state.jobs.get('review-1') === undefined, '就地返回后 job 应被移除');
 }
@@ -335,7 +360,9 @@ console.log('\nC. CLI 评审者');
 	await run(h, { instructions: '--focus on concurrency' });
 	const argv = h.state.spawns.find((spec) => spec.argv[0] === '/fake/codex').argv;
 	check('C 有 PROMPT 时不带范围开关', !argv.some((token) => ['--uncommitted', '--base', '--commit'].includes(token)), JSON.stringify(argv));
-	check('C PROMPT 前有 -- 终止符', argv.at(-2) === '--' && argv.at(-1) === '--focus on concurrency', JSON.stringify(argv.slice(-3)));
+	check('C PROMPT 前有 -- 终止符', argv.at(-2) === '--' && argv.at(-1).startsWith('--focus on concurrency'), JSON.stringify(argv.slice(-2)));
+	// codex 也要拿到统一输出格式，否则一份报告里两种体例
+	check('C PROMPT 带统一输出格式', argv.at(-1).includes('### 输出格式') && argv.at(-1).includes('## 问题'), argv.at(-1));
 }
 {
 	// 模式提示词也走 PROMPT，与 instructions 合并。
@@ -436,6 +463,21 @@ console.log('\nF. 编排');
 	check('F job 已移除', h.state.jobs.size === 0);
 }
 {
+	// 进度心跳：子智能体可能跑 20 分钟以上且中间没有输出，调用方至少要看出「还在跑」。
+	{
+		const mod = await import(PLUGIN);
+		mod.__internals.heartbeatMs = 15;
+		const hb = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, wait: 'running', report: 'x', spawnDelayMs: 60 } });
+		await run(hb, {});
+		const rec = hb.state.jobs.get('review-1');
+		await new Promise((resolve) => setTimeout(resolve, 70));
+		await rec.settledPromise;
+		const lines = rec.progressLog ?? [];
+		check('F 进度有初始行', lines[0] === 'reviewing (codex)', JSON.stringify(lines));
+		check('F 进度有心跳（含仍在跑的评审者与用时）', lines.some((line) => /^reviewing \(codex\) — \d+m\d\ds$/.test(line)), JSON.stringify(lines.slice(1)));
+		check('F 心跳不止一次', lines.filter((line) => line.includes('—')).length >= 2, String(lines.filter((line) => line.includes('—')).length));
+		mod.__internals.heartbeatMs = 30_000;
+	}
 	// 后台返回：先拿 job id，环里最终是报告。
 	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, wait: 'running', report: '后台结论' } });
 	const value = await run(h, {});
@@ -694,7 +736,7 @@ console.log('\nH. 回归');
 	await run(focus, { instructions: '只看并发' });
 	const focusArgv = focus.state.spawns.find((spec) => spec.argv[0] === '/fake/codex-wrapper').argv;
 	check('H 自定义 codex 形状：有 PROMPT 时不带范围开关', !focusArgv.some((token) => ['--uncommitted', '--base', '--commit'].includes(token)), JSON.stringify(focusArgv));
-	check('H 自定义 codex 形状：PROMPT 用 -- 终止符', focusArgv.at(-2) === '--' && focusArgv.at(-1) === '只看并发', JSON.stringify(focusArgv.slice(-3)));
+	check('H 自定义 codex 形状：PROMPT 用 -- 终止符', focusArgv.at(-2) === '--' && focusArgv.at(-1).startsWith('只看并发'), JSON.stringify(focusArgv.slice(-2)));
 
 	const scoped = await loadPlugin({
 		plugin: { reviewers: custom, modes: { deep: { strength: 'deep' } }, defaultMode: 'deep' },
@@ -1454,7 +1496,7 @@ console.log('\nK. GUI 配置的宿主半边');
 		});
 		check('K schema 默认值与插件 DEFAULTS 一致', drifted.length === 0, JSON.stringify(drifted.map(([path, expected]) => `${path}: schema=${JSON.stringify(meta(path.split('.')).default)} defaults=${JSON.stringify(expected)}`)));
 		// 表单打开时数值/开关字段应该有真实值可显示
-		check('K 数值与开关默认值可显示', meta(['waitMs']).default === 120000 && meta(['injectPolicy']).default === false && meta(['language']).default === 'auto');
+		check('K 数值与开关默认值可显示', meta(['waitMs']).default === 0 && meta(['injectPolicy']).default === false && meta(['language']).default === 'auto');
 		check('K 硬超时默认 0（不限制）', meta(['hardTimeoutMs']).default === 0);
 	}
 }

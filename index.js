@@ -1,17 +1,17 @@
 /**
  * dsh-review —— DSH Host 插件：给智能体一个通用的 `review` 工具。
  *
- * 一个工具，三种评审者：
+ * 一个工具，两种评审者（都是具备完整智能体能力的执行体）：
  *
  * - `cli`：codex / claude / gemini / cursor-agent / 自定义 argv 模板。进程由宿主侧
  *   `ctx.subprocess` 直接起，不走 bash 工具，所以不受 DSH 文件沙箱与命令审批影响
  *   （codex 需要读写 `~/.codex`，在沙箱下会直接 `Operation not permitted`，走审批
  *   又会让每次评审都卡一次）。
- * - `llm`：走 DSH 自己的 `ctx.llm` 服务调别的模型（百炼 qwen、glm、deepseek……）。
- *   插件自己收集 diff 组成评审包，模型只回答结论，不需要工具权限。
- * - `subagent`：`ctx.subagents` 起一个子智能体，可以自己翻仓库、跑只读命令。
+ * - `subagent`：`ctx.subagents` 起一个子智能体，可以自己翻仓库、跑只读命令；模型来自
+ *   DSH 自己的 provider 配置。默认剔除 `review` 工具，避免「评审者再起评审者」。
  *
- * 三者都收敛成同一份报告，由 `mode` 控制强度与提示词；`config` 决定暴露哪些评审者。
+ * 刻意**没有**「把 diff 丢给一个裸模型」这一类：能自己打开仓库的评审者更有价值。
+ * 两者都收敛成同一份报告，由 `mode` 控制强度与提示词；`config` 决定暴露哪些评审者。
  *
  * 执行放进 `ctx.jobs` 后台注册表（与 bash 后台命令同一套机制）：工具会等一小段
  * 时间，跑完就地返回结论，没跑完就交回 job id，之后由模型用 `job_output` 收结果、
@@ -39,6 +39,9 @@ export const name = 'review';
  * undefined —— 插件照常工作，只是 GUI 里没有表单（工具描述会说明）。
  */
 export { Config };
+
+/** 仅供自测：把心跳间隔调小，避免用例等 30 秒。 */
+export const __internals = { heartbeatMs: 30_000 };
 
 /** 硬依赖：缺任何一个都说明这套组合跑不了这个工具，直接不激活而不是半残。 */
 export const inject = ['tools', 'subprocess', 'jobs'];
@@ -282,6 +285,17 @@ export function apply(ctx, config) {
 						timer.unref?.();
 					}
 					job.updateProgress(`reviewing (${ids.join(', ')})`);
+					// 心跳：子智能体实测能跑 20 分钟以上，而中间没有任何输出，调用方只能靠猜。
+					// 定期把「谁还在跑 + 已用时」写进进度，至少能看出它没死。
+					const pending = new Set(ids);
+					const startedAt = Date.now();
+					const heartbeat = setInterval(() => {
+						if (pending.size === 0) return;
+						const seconds = Math.round((Date.now() - startedAt) / 1000);
+						const elapsed = `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
+						job.updateProgress(`reviewing (${[...pending].join(', ')}) — ${elapsed}`);
+					}, __internals.heartbeatMs);
+					heartbeat.unref?.();
 
 					const done = (async () => {
 						try {
@@ -290,7 +304,12 @@ export function apply(ctx, config) {
 							// 没有改动就不要打扰评审者：多花几分钟、还容易换来一堆幻觉 findings。
 							const gitBroke = changes.notes.some((note) => note.includes('失败'));
 							if (changes.isRepo && !gitBroke && changes.summary.empty) {
-								const empty = ['## 评审范围', '', `- 范围：${describeTarget(target)}`, '- 未检测到需要评审的改动（该范围内没有文件变化）。'].join('\n');
+								// 材料说明（例如「不是 git 仓库」）必须一起给：否则在非 git 目录里
+							// 用户只会看到「未检测到需要评审的改动」，完全不知道原因。
+							const emptyParts = ['## 评审范围', '', `- 范围：${describeTarget(target)}`, '- 未检测到需要评审的改动（该范围内没有文件变化）。'];
+							if (changes.notes.length > 0) emptyParts.push('', '### 材料说明', '', ...changes.notes.map((note) => `- ${note}`));
+							if (live.warnings.length > 0) emptyParts.push('', '### 配置告警', '', ...live.warnings.map((warning) => `- ${warning}`));
+							const empty = emptyParts.join('\n');
 								job.append(empty, { channel: 'stdout' });
 								// 短路也不能漏临时目录：它在 ctx.jobs.start 之前就建好了。
 								await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
@@ -298,7 +317,7 @@ export function apply(ctx, config) {
 							}
 
 							const brief = buildBrief({ settings: live, mode, target, changes, extraNotes: changes.notes });
-							const nativePrompt = buildNativePrompt(mode, target);
+							const nativePrompt = buildNativePrompt(mode, target, live.language === 'en' ? 'en' : 'zh');
 							const briefText = flattenBrief(brief);
 							const scopeGiven = target.base.length > 0 || target.commit.length > 0;
 
@@ -315,6 +334,8 @@ export function apply(ctx, config) {
 
 							const outcomes = await Promise.all(
 								reviewers.map((reviewer, index) => {
+									// 每个评审者结束后从 pending 里摘掉，心跳里就只剩真正在跑的。
+									const track = (promise) => promise.finally(() => pending.delete(reviewer.id));
 									// 以 argv 投递提示词的评审者要过单参数字节闸，stdin 投递不受限。
 									// 截断会被记进报告脚注：评审者看到的材料比别人少这件事必须可见。
 									let promptText;
@@ -330,20 +351,23 @@ export function apply(ctx, config) {
 											}
 										}
 									}
-									return runReviewer(ctx, reviewer, {
-										cwd,
-										target,
-										brief,
-										changes,
-										settings: live,
-										agent: exec.agent,
-										signal: controller.signal,
-										promptText,
-										reportPath: reviewer.capture === 'report' ? join(workdir, `report-${safeFileName(reviewer.id, index)}.md`) : reportPath,
-									});
+									return track(
+										runReviewer(ctx, reviewer, {
+											cwd,
+											target,
+											brief,
+											changes,
+											settings: live,
+											agent: exec.agent,
+											signal: controller.signal,
+											promptText,
+											reportPath: reviewer.capture === 'report' ? join(workdir, `report-${safeFileName(reviewer.id, index)}.md`) : reportPath,
+										}),
+									);
 								}),
 							);
 
+							clearInterval(heartbeat);
 							if (argvTruncated.length > 0) {
 								reportNotes.push(
 									`${[...new Set(argvTruncated)].join('、')}：提示词超过单参数 ${live.maxArgBytes} 字节上限，diff 被截断后才交给 CLI。这些评审者看到的材料比其他人少——「没有问题」不等于覆盖了全部改动；要看完整 diff 请调小 maxDiffChars 分批评审，或改用 subagent 评审者（它自己去读仓库，不受这个上限影响）。`,

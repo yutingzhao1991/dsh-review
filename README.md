@@ -6,9 +6,8 @@
 [![dsh plugin](https://img.shields.io/badge/dsh-plugin-4c6ef5.svg)](https://github.com/deepseek-ai/deepseek-harness)
 [![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#install)
 
-Code review as a tool, not a single vendor. Hand your diff to a CLI coding agent, to another
-model you already have configured, or to a read-only agent that can open files itself — then
-read one merged report.
+Code review as a tool, not a single vendor. Hand your diff to a CLI coding agent, or to a
+subagent running a model from your DSH configuration — then read one merged report.
 
 ![The configuration page](docs/images/gui-en.png)
 
@@ -73,6 +72,11 @@ One thing worth knowing: a `subagent` inherits the parent session's model unless
 `agentModel`, so it is **not** automatically a second opinion — name the model explicitly if you
 want one.
 
+Subagents get two safety nets by default: the `review` tool itself is filtered out (so a reviewer
+cannot start more reviews) and a 30-minute wall-clock ceiling applies (`timeoutMs` per reviewer;
+`hardTimeoutMs` still caps the whole call). Progress is reported while they run, so a long review
+does not look stuck.
+
 There is deliberately no "send the diff to a bare model" kind: a reviewer that can open the
 repository itself is worth more than one that only sees what it was handed.
 
@@ -135,7 +139,7 @@ knowing:
 | `injectPolicy` | `false` | state each mode's `when` rule in the system prompt |
 | `agents` / `reviewers` | `[]` | define CLI and subagent reviewers (`agents` is the preset shorthand, `reviewers` the full form) |
 | `modes` | `{}` | named review modes |
-| `waitMs` | `120000` | how long a call blocks before handing back a job id; `0` = return immediately |
+| `waitMs` | `0` | how long a call blocks before handing back a job id. `0` returns immediately (reviews take minutes, so waiting rarely pays) |
 | `hardTimeoutMs` | `0` | wall-clock ceiling; `0` = no limit — you decide when to stop it |
 | `maxResultChars` | `80000` | report cap; longer reports are truncated with a path to the full file |
 | `maxDiffChars` | `160000` | diff cap for reviewers that receive the diff |
