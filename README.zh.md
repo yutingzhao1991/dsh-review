@@ -1,91 +1,68 @@
----
-description: "给 DSH 智能体的通用代码评审工具：一次评审可以派给 CLI 智能体（codex、claude……）、DSH 自己调用的其他模型，或一个只读子智能体——全部由一份 config 驱动。"
-kind: "plugin"
----
-
 # dsh-review
 
 [English](README.md) | **中文**
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![dsh plugin](https://img.shields.io/badge/dsh-plugin-4c6ef5.svg)](https://github.com/deepseek-ai/deepseek-harness)
-[![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#设计取舍)
-[![reviewers: cli · llm · subagent](https://img.shields.io/badge/reviewers-cli%20%C2%B7%20llm%20%C2%B7%20subagent-orange.svg)](#三种评审者)
+[![dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#安装)
 
-一个工具 —— `review` —— 把你的改动交给你信得过的人来读：CLI 编码智能体、DSH 自己
-provider 栈里的模型，或者一个只读的 DSH 子智能体。**暴露哪些评审者、用哪个模型、盯得
-多严**，全部写在 config 里。零运行时依赖，只用 `node:` 内置模块。
+代码评审不该绑死在一家身上。把改动交给一个 CLI 编码智能体、交给一个你已经配好的模型，
+或者交给一个能自己翻文件的只读智能体——最后读一份合并好的结论。
 
-```mermaid
-flowchart LR
-    A["智能体调用<br/>review({ mode, reviewers })"] --> B["收集改动<br/>（宿主侧 git）"]
-    B --> C1["cli<br/>codex · claude · gemini · 自定义"]
-    B --> C2["llm<br/>dsh ctx.llm → 任意 provider"]
-    B --> C3["subagent<br/>只读 DSH 子智能体"]
-    C1 --> D["合并成一份报告"]
-    C2 --> D
-    C3 --> D
-    D --> E{"waitMs 内<br/>跑完了吗"}
-    E -- 是 --> F["就地返回"]
-    E -- 否 --> G["给 job id → job_output"]
-```
+![配置页](docs/images/gui-zh.png)
 
-## 目录
+## 它能做什么
 
-- [为什么要有它](#为什么要有它)
-- [安装](#安装)
-- [快速开始](#快速开始)
-- [三种评审者](#三种评审者)
-- [模型发现](#模型发现)
-- [在 GUI 里配置](#在-gui-里配置)
-- [评审模式](#评审模式)
-- [配置项](#配置项)
-- [一次调用是怎么跑的](#一次调用是怎么跑的)
-- [自测](#自测)
-- [设计取舍](#设计取舍)
-- [已知限制](#已知限制)
-- [License](#license)
-
-## 为什么要有它
-
-`codex exec review` 自己跑没问题，但让智能体通过 `bash` 工具跑会撞两堵墙：
-
-1. **沙箱** —— codex 要读写 `~/.codex`（会话日志、sqlite、PATH 别名）。在 DSH 文件沙箱下
-   会直接 `Operation not permitted`，评审还没开始就失败。
-2. **命令审批** —— `codex` 不在 `run_command` 的自动放行清单里，每次评审都要过一遍审批；
-   审批关成 `never` 时直接被拒。
-
-这个插件把进程交给宿主侧的 `ctx.subprocess` 起，两者都不经过；命令行由插件拼装，模型只能
-选「评审哪个范围」和「用哪个评审者」，没有注入别的开关的余地。
-
-这个理由可以推广：**任何**评审都需要一个调用方不方便直接够到的评审者。所以这里不是一个写死
-的 `codex_review`，而是一张评审者注册表，`review` 从里面挑。
-
-评审本身是只读的：**刻意不暴露** `--dangerously-bypass-approvals-and-sandbox` 这类开关，
-codex 自己的沙箱与审批策略仍按用户 `~/.codex/config.toml` 走。
+- **三种评审者。** `codex` / `claude` / `gemini` / `opencode` / `cursor`，或你自己拼命令行的
+  任意 CLI；DSH provider 配置里的任意模型；或者一个能读仓库的 DSH 子智能体。
+- **多个评审者，一份报告。** 并行跑，结论合并；每个评审者一节，可选再走一遍汇总去重、
+  标注共识。
+- **评审模式。** 强度与提示词起个名字（`quick`、`balanced`、`deep`……）配一次就能复用，
+  不必每次重写评审要求。
+- **在 GUI 里配置。** 勾选要用的评审者，其余都收在「高级配置」里。
+- **不碰密钥、不碰端点。** provider 与凭据都留在你的 DSH 配置里，插件只用已经有的。
 
 ## 安装
 
-clone 到你想长期保留的位置（profile 会**软链**到这个目录，别删也不用拷）：
+clone 到一个长期保留的位置，然后装进 profile：
 
 ```sh
 git clone git@github.com:yutingzhao1991/dsh-review.git ~/code/github/dsh-review
+dsh plugin --profile web add ~/code/github/dsh-review     # web 换成你的 profile 名
 ```
 
-然后二选一：
+也可以让智能体调 `plugin_manager` 的 `install_bundle`，`target` 传上面的绝对路径。
 
-- 让智能体调 `plugin_manager` 的 `install_bundle`，`target` 传 clone 出来的**绝对路径**；
-- 或命令行 `dsh plugin --profile web add ~/code/github/dsh-review`（`web` 换成你的 profile
-  名；每个 profile 各装一次）。
+装完**重启宿主**。升级同理：`git pull` 之后重启。
 
-新装的 bundle 立刻生效。**但改完 `index.js` 后必须重启宿主进程**：加载器用的是普通
-`import()`，同路径的模块被 ESM 缓存，而 profile 的 `hmr.root` 默认为空、并不监听这个目录
-——单靠启停 plugin row 不会重新求值。升级同理：`git pull` 之后重启。
+## 怎么用
 
-## 快速开始
+```js
+review()                                          // 用你启用的评审者，评审未提交的改动
+review({ reviewers: ["codex", "qwen"] })          // 这次指定评审者
+review({ mode: "deep" })                          // 深度模式：多个评审者 + 汇总
+review({ base: "main" })                          // 工作区相对某个分支的改动
+review({ commit: "abc1234" })                     // 某个提交引入的改动
+review({ instructions: "只看并发与错误处理" })
+```
+
+评审要跑几分钟，所以调用会先等一小段，然后把 job id 交回：用 `job_output` 读结论、
+`job_kill` 终止，或者就等着——跑完会自动通知。
+
+评审者是**显式启用**的：一个都没启用时，不带 `reviewers` 的调用会直接报错，而不是
+悄悄把能用的都跑一遍。
+
+## 评审者
+
+| 类型 | 跑什么 | 自己会读代码吗 | 依赖 |
+| --- | --- | --- | --- |
+| `cli` | 你已经信得过的编码智能体 | 看预设（codex 会自己读仓库） | 本机装了那个 CLI |
+| `llm` | DSH provider 配置里的模型 | 不会——diff 直接发给它 | 配好的 provider + 模型 |
+| `subagent` | DSH 子智能体 | 会，它有工具 | 一个 subagent provider |
+
+CLI 预设：`codex`、`claude`、`gemini`、`opencode`、`cursor`，或 `custom` 自定义命令模板。
 
 ```yaml
-# ~/.dsh/profiles/<profile>/cordis.patch.yml
 - id: review
   name: dsh-review
   config:
@@ -93,434 +70,88 @@ git clone git@github.com:yutingzhao1991/dsh-review.git ~/code/github/dsh-review
       - preset: codex
         model: gpt-5.6-sol
     models:
-      - provider: bailian
+      - provider: bailian          # 你 DSH 配置里的任意 provider
         model: qwen3.8-max
-        label: Qwen3.8-Max
-      - provider: bailian
-        model: glm-5.3
-    defaultMode: balanced
-    modes:
-      balanced:
-        strength: standard
-        reviewers: [ codex, qwen3.8-max ]
-      deep:
-        strength: deep
-        reviewers: [ codex, qwen3.8-max, glm-5.3 ]
-        synthesize: true        # 把多份结论合并、去重成一份清单
 ```
 
-然后智能体这边：
+`llm` 类型走的是 DSH 自己的 LLM 服务，所以 provider、密钥、上下文窗口、是否支持图片，
+全都来自你的 DSH 配置——这里不复制任何一份。任何已注册的模型还可以直接指名，不必先写进配置：
 
 ```js
-review()                                            // 全部启用的评审者，评审未提交的改动
-review({ reviewers: ["codex"] })                    // 只要 codex
-review({ mode: "deep" })                            // 深度强度 + 汇总
-review({ base: "main" })                            // 工作区相对某个分支的改动
-review({ commit: "abc1234" })                       // 某个提交引入的改动
-review({ instructions: "只看并发与错误处理" })
+review({ reviewers: ["bailian/kimi-k3"] })
 ```
 
-## 三种评审者
-
-| kind | 怎么跑 | 自己会读代码吗 | 依赖 | 适合 |
-| --- | --- | --- | --- | --- |
-| `cli` | 宿主侧 `ctx.subprocess`，argv 由模板展开 | 看预设（codex：会） | 本机装了那个 CLI | 复用你already信得过的编码智能体 |
-| `llm` | `ctx.llm.stream()` —— DSH 自己的 provider 栈 | 不会，插件喂它 diff 包 | 配好的 provider + 模型 | 用另一个模型便宜地拿第二意见 |
-| `subagent` | `ctx.subagents.start()` —— 真正的 DSH 子智能体 | 会，它有工具 | 一个 subagent provider | 需要翻文件、grep、跑只读命令的评审 |
-
-### `cli` 预设
-
-| 预设 | 可执行文件 | argv 形态 | 结论来源 |
-| --- | --- | --- | --- |
-| `codex` | `codex` | `exec review {range} --ephemeral -m <model> --output-last-message <file> [-- <prompt>]` | 报告文件 |
-| `claude` | `claude` | `--print --output-format text [--model <m>] <prompt>` | stdout |
-| `gemini` | `gemini` | `-p <prompt> [-m <m>]` | stdout |
-| `opencode` | `opencode` | `run [--model <m>] <prompt>` | stdout |
-| `cursor` | `cursor-agent` | `--print [--model <m>] <prompt>` | stdout |
-| `custom` | 你指定 | 你的 `command` 模板 | `stdout` 或 `report` |
-
-`codex` 走它**原生**的 `exec review` 子命令：它自己会遍历仓库，所以插件不喂 diff。其他预设
-拿到的是一个 **diff 包** —— 变更统计、`git status`、完整 patch、未跟踪新文件的正文 —— 因为
-它们自己不认识 git。
-
-因为 codex CLI 不接受范围开关旁边的 `[PROMPT]`，**范围永远优先**：指定了 `base`/`commit` 时，
-模式的提示词就不传给 codex（报告脚注会写明这件事），而不是悄悄把范围丢掉。
-
-未跟踪的新文件只算进**未提交**这个范围。对 `base`/`commit` 来说，它们既不在
-`git diff <base>` 里也不在 `git show <commit>` 里，所以既不进材料也不进变更规模，只留一条
-说明。
-
-`custom` 评审者就是一个模板加占位符：
-
-```yaml
-reviewers:
-  - id: my-agent
-    kind: cli
-    preset: custom
-    executable: /opt/bin/my-reviewer
-    command: [ "{exe}", "--json", "{model}", "{report}", "{extra}", "{prompt}" ]
-    capture: report            # 从 {report} 读结论
-    promptVia: argv            # 或 stdin
-    model: my-model
-    extraArgs: [ "--strict" ]
-```
-
-| 占位符 | 展开成 |
-| --- | --- |
-| `{exe}` | 解析出来的可执行文件 |
-| `{range}` | `--uncommitted` / `--base <ref>` / `--commit <sha>`（该预设允许 PROMPT 取代范围时为空） |
-| `{model}` | 预设的模型开关 + 模型 id（没配模型时为空） |
-| `{ephemeral}` | `--ephemeral` |
-| `{report}` | 让评审者写结论的文件路径 |
-| `{reportArg}` | `--output-last-message <path>` |
-| `{prompt}` | 完整评审提示词（`promptVia: stdin` 时为空） |
-| `{promptArg}` | `--` 加提示词 —— codex 的原生形态 |
-| `{extra}` | `extraArgs` |
-
-预设声明了 `promptReplacesRange: true`（codex）**或**模板里带 `{promptArg}` 时，评审者按
-**原生**形态处理：一旦拿到提示词就去掉范围开关，因为这类 CLI 不允许 `[PROMPT]` 与
-`--uncommitted`/`--base`/`--commit` 同时出现——自定义的 codex 包装脚本正是这么写的。其他模板
-既保留范围开关，也保留提示词。
-
-### `llm` 评审者
-
-插件自己跑 git、按预算拼出评审包，然后通过 `ctx.llm` 调模型 —— 和智能体循环用的是同一个
-服务。模型只回文本：不需要工具权限，也不需要访问仓库。
-
-```yaml
-models:
-  - provider: bailian           # 任何注册进 dsh-llm 的 provider
-    model: qwen3.8-max
-    label: Qwen3.8-Max
-    llm:
-      maxTokens: 8192
-      temperature: 0
-```
-
-流由插件自己消费（`text-delta` 分片 + 终态 `finish`），因此不需要 import
-`@deepseek-ai/dsh-llm`，也就不会被它的版本连坐。
-
-#### 模型列表来自哪里
-
-**来自 DSH 的 provider 配置，不是这个插件。** 评审者只是按名字**引用** `provider` + `model`；
-端点、密钥、上下文窗口、是否支持图片，全都留在你的 DSH 配置里（`dsh-llm-pi-ai`、
-`dsh-llm-deepseek`……）。插件里没有 API key、没有 `baseURL`、没有 `fetch`。
-
-所以你不必在这里把每个模型再抄一遍，两种用法直接拿 DSH 里已有的：
-
-```js
-review({ reviewers: ["bailian/kimi-k3"] })   // 直接指名任意已注册模型
-review({ reviewers: ["kimi-k3"] })           // 裸模型名，唯一时可用
-```
-
-`provider/model` 指认默认就是开的（`discover.adHoc`）。用之前插件会先问 `ctx.llm` 这条路由
-是否真的存在，所以写错名字会明确报错、并列出 DSH 当前有什么，不会静默回退。
-
-想让某个 provider 的模型直接变成一等公民式的评审者，打开模型发现：
+想让某个 provider 的模型变成一等公民式的评审者（GUI 里能勾、模式里能用），打开模型发现：
 
 ```yaml
 config:
   discover:
-    providers: [ bailian ]                  # 范围键：写了就自动打开发现
-    exclude: [ "*embedding*", "*rerank*" ]  # 既不展开，也禁止按需指名
-    include: [ "qwen*", "glm*" ]            # 可选白名单
-    label: "{providerName}/{model}"         # {provider} {providerName} {model} {name}
-    inDefault: false                        # 不让它们进默认集合
-    adHoc: true                             # 允许 provider/model 指认
+    providers: [ bailian ]
+    exclude: [ "*embedding*", "*rerank*" ]
 ```
-
-发现出来的评审者 id 是 `provider/model`，标签按 `label` 渲染，报告里标 **自动发现**；按需指名的
-标 **按需指名**。解析发生在每次调用，所以 DSH 那边加/删模型立刻生效——插件里没有会过期的副本。
-
-### `subagent` 评审者
-
-通过 `ctx.subagents` 起一个 DSH 子智能体。它提示词里拿到同一份评审包，**同时保留自己的
-工具**，所以能打开文件、核对 diff 里看不到的调用点。
-
-```yaml
-reviewers:
-  - id: deep-dive
-    kind: subagent
-    provider: spawn                       # ctx.subagents 的 provider 名
-    agentProvider: bailian
-    agentModel: deepseek-v4.1-flash
-    label: DSH 子智能体
-    maxDepth: 1
-    persona: "你是一名一丝不苟的评审者。"
-    toolFilter: { ... }                   # 原样传给子智能体请求
-```
-
-## 模型发现
-
-「有哪些评审者」和「有哪些模型」是两件事，这个插件只管前者：
-
-| | 归属 | 例子 |
-| --- | --- | --- |
-| **定义** —— 端点、密钥、上下文窗口、模态 | 你的 DSH provider 配置 | `bailian` → `baseURL`、`apiKeyEnv: BAILIAN_API_KEY`、`models: [...]` |
-| **选用** —— 哪几个当评审者、id、标签、默认集合 | 本插件的 `config` | `reviewers: [{ id: qwen, provider: bailian, model: qwen3.8-max }]` |
-
-所以插件里既没有密钥、也不会去连 provider 端点，更不存在一份会过期的模型清单。
-`ctx.llm.listProviders()` / `listModels(provider)` 是唯一事实来源，每次调用现问。
-
-| `discover` 键 | 默认 | 含义 |
-| --- | --- | --- |
-| `enabled` | 跟随范围键 | 是否把发现出来的模型展开成评审者 |
-| `providers` | 全部已注册 | 展开哪些 provider（**范围键**：写了它就会打开发现） |
-| `include` | `[]` | 白名单 glob，对 `provider/model` 与裸 model 都匹配 |
-| `exclude` | `[]` | 黑名单 glob：既不展开，也不允许按需指名 |
-| `label` | `{model}` | 标签模板：`{provider}`、`{providerName}`、`{model}`、`{name}` |
-| `inDefault` | `false` | 发现出来的评审者是否进默认集合 |
-| `adHoc` | `true` | 允许 `reviewers: ["bailian/kimi-k3"]` 这种不在配置里的指名 |
-| `listModelsTimeoutMs` | `8000` | 单个 provider 取模型列表的预算；慢的跳过，不拖垮整次调用 |
-
-解析顺序：
-
-1. 配置里的评审者 id 精确命中；
-2. 裸模型名，**且全局唯一**（重名不猜）；
-3. `provider/model`，前提是 `adHoc` 开着且 DSH 真的注册了这条路由。
-
-不会凭空造模型：三者都不匹配时报错，并同时列出「配置里的评审者」与「DSH 当前已注册的模型」。
-
-如果配置里**只有** `discover`、没有任何静态评审者，那么发现出来的集合就是默认集合——否则
-「不传参数调 `review()`」会变成一个没有意义的空集合。
-
-## 在 GUI 里配置
-
-不一定要手改 YAML。打开侧边栏的 **Plugins**，找到 **dsh-review**，进它的行页面（或包卡片）——
-那一页就是这个插件的配置表单，而且**能选的地方都让你选，不让你填**。
-
-页面按「你最先关心什么」排序：
-
-| 分区 | 内容 |
-| --- | --- |
-| **启用的评审者**（最上面） | 每个已定义评审者一行：开关、id、以及它指向什么（`cli · codex`、`llm · bailian/qwen3.8-max`）。勾上就是「默认用它」，可选范围只来自下面的定义。 |
-| **评审者定义** | 结构化编辑器：增删行、`类型` 用分段控件选、**provider / 模型从宿主实时目录里选**，不用背模型名 |
-| **高级配置**（默认收起） | 评审行为（语言、是否注入策略、默认模式）、评审模式、模型发现（开关、**由宿主目录喂出来的 provider 多选**、glob 名单、标签模板）、预算与超时（预填**当前实际生效**的数字） |
-
-**一个都不勾 = 不启用任何评审者**：这时直接调 `review()` 会报错，要求你去勾选或用
-`reviewers` 参数显式指定——空集合永远不会被解释成「把能用的都跑一遍」。
-
-几个要点：
-
-- **provider / 模型列表来自 DSH 自己。** 页面向宿主要模型目录（`remote.session.modelCatalog`），所以「模型」是你在 DSH 里配的那些模型的下拉。目录读不到时，这两个控件会退回手填，并在页面上写明原因。
-- **评审者与模式是结构化编辑器，另留 JSON 兜底。** DSH 的公共表单控件没有嵌套编辑器，所以这一页自己渲染行编辑器（增删行 + 逐字段控件），写回去的仍是 YAML 里那份一样的 JSON 值。折叠的「**显示原始 JSON**」可以直接改它；JSON 非法或缺 `id` 会拦住保存并说明原因。
-- **表单没覆盖的键仍在 YAML 里** —— `agents`、`models`、`envPassthrough` 等。profile 配置始终是唯一事实来源，保存只是重写被暴露的那些键。
-- **保存**走 DSH 自己的设置机制：写进 profile 的 patch（`cordis.patch.yml`）并立即生效，文档在你编辑期间被别处改动会拒绝覆盖。表单是暂存式的：点「保存」才写一次，离开页面丢弃草稿。
-
-实现上：宿主半边声明了一份 [schemastery](https://github.com/shigma/schemastery) 的 `Config` schema，字段都标了 `.volatile()`——因为 `dsh-settings` 只会把 volatile 字段投影成表单。浏览器半边（`client/client.js`）把这个表单注册到 Plugins 页自己的配置槽位，并复用 DSH 官方的 `SettingsForm` / `SettingsFormModel`，所以暂存、保存与冲突处理都和官方设置页一致。
-
-如果加载时解析不到 schemastery（插件是 link 进来的，Node 按仓库目录解析依赖），插件照常工作——只是没有 GUI 表单，工具描述里会写明这一点。
 
 ## 评审模式
 
-一个**模式**就是一束命名配置：盯得多严（`strength`）、额外说什么（`prompt`）、用谁
-（`reviewers`）、要不要合并结论（`synthesize`）。
+一个模式就是一束「盯多严、额外说什么、用谁」。
 
-| 字段 | 类型 | 含义 |
-| --- | --- | --- |
-| `strength` | `light` \| `standard` \| `deep` | 内置的强度措辞，追加到评审者的 system 提示词 |
-| `prompt` | string | 这个模式自己的评审指令（codex 也会把它当 `PROMPT` 收到） |
-| `reviewers` | string[] | 覆盖这个模式用的评审者集合 |
-| `synthesize` | boolean | 评审者跑完后，让一个 `llm` 评审者把结论合并去重 |
-| `synthesizeReviewer` | string | 由哪个 `llm` 评审者做汇总（默认：选中的第一个） |
-| `when` | `always` \| `complex` \| `never` | 评审策略，只在 `injectPolicy: true` 时使用 |
-| `minChangedLines` | number | `complex` 策略文本里引用的阈值 |
-| `label`、`description` | string | 展示在工具描述里 |
-
-### 默认：什么都不设
-
-插件**不**替你决定什么时候必须评审。不写 `modes`、不开 `injectPolicy` 时，它不往系统提示词
-里加任何东西，工具描述也只是说明「没有配置模式」—— 你要约束智能体，用你自己的提示词、技能或
-`AGENTS.md` 就行，哪个顺手用哪个。这是有意为之的默认值。
-
-如果你确实想把规则写进系统提示词，打开 `injectPolicy: true` 并给模式一个 `when`：
+| 字段 | 含义 |
+| --- | --- |
+| `strength` | `light` / `standard` / `deep`——内置的评审措辞 |
+| `prompt` | 这个模式自己的评审指令 |
+| `reviewers` | 这个模式用哪些评审者 |
+| `synthesize` | 把各评审者的结论合并去重 |
+| `when` | `always` / `complex` / `never`——给智能体看的评审策略 |
 
 ```yaml
 config:
-  injectPolicy: true
-  defaultMode: gated
+  defaultMode: balanced
   modes:
-    gated:
-      when: complex              # 或 always / never
-      minChangedLines: 50
+    balanced:
+      strength: standard
+      reviewers: [ codex, qwen3.8-max ]
+    deep:
+      strength: deep
+      reviewers: [ codex, qwen3.8-max, glm-5.3 ]
+      synthesize: true
 ```
 
-- `always` —— 「任何改动都必须在宣布任务完成之前过一遍 `review`」。
-- `complex` —— 「并发、错误处理、安全、数据迁移、公开接口、构建配置，或者大到一个提交说不清
-  的改动需要评审；文案、注释这类琐碎改动不必」。
-- `never` —— 明确不强制。
-
-这是**写进系统提示词的要求，不是硬闸门**：插件永远不会阻断一轮对话。真正的闸门得去拦工具
-调用，那是另一个产品决策。
+一个模式都不配时，插件不追加任何约束——你继续用自己的提示词管智能体就行。`when` 只有在同时
+打开 `injectPolicy: true` 时才生效，而且它只是写进系统提示词的要求，不是强制闸门。
 
 ## 配置项
 
-所有键都可选，默认值在 `lib/settings.js`。
+所有配置都能在 GUI 里改；下面是同一批键在 YAML 里的样子，只列值得知道的：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `agents` | `[]` | `cli` 评审者简写；`id` 默认取预设名 |
-| `models` | `[]` | `llm` 评审者简写；`id` 默认取模型名 |
-| `reviewers` | `[]` | 完整评审者定义（见下）；同 id 时覆盖简写；GUI 里以 JSON 编辑 |
-| `discover` | `{ enabled: false, adHoc: true, … }` | 直接用 DSH provider 配置里的模型，不必在这里再抄一遍（见[模型发现](#模型发现)）；可在 GUI 里改 |
-| `defaultReviewers` | **一个都没有** | 工具调用没给 `reviewers` 时用的 id 集合。空 = **不启用任何评审者**，这种调用会直接报错，绝不会被当成「全部启用」。在 GUI 顶部列表或 YAML 里设置 |
-| `defaultMode` | 不设 | 工具调用没给 `mode` 时套的模式；可在 GUI 里改 |
-| `modes` | `{}` | 命名评审模式；GUI 里以 JSON 编辑 |
-| `injectPolicy` | `false` | 把各模式的 `when` 规则写进系统提示词；可在 GUI 里改 |
-| `language` | `auto` | `zh` / `en` / `auto` 输出语言（`auto` 跟随 `instructions`，没有指令时用中文）；可在 GUI 里改 |
-| `waitMs` | `120000` | 前台等待时长，超时交回 job id；`0` 表示不等待、直接交回 |
-| `hardTimeoutMs` | **`0`** | 兜底墙钟上限；`0` = 不限制（默认）——评审跑多久由调用方决定（等 job，或 `job_kill` 终止） |
-| `maxResultChars` | `80000` | 回给模型的报告上限，超出按首尾截断并给出完整报告路径 |
-| `maxDiffChars` | `160000` | 喂给 `llm`/`subagent`/需要 diff 的 CLI 评审者的 diff 包上限 |
-| `maxFileDiffChars` | `40000` | 单文件 diff 上限 |
-| `maxDiffFiles` | `60` | 最多这么多个文件进入 diff |
-| `maxUntrackedFileChars` | `20000` | 读取未跟踪新文件时的单文件上限 |
-| `maxArgBytes` | `98304` | 以 `argv` 收提示词的 CLI 评审者的单参数字节上限（Linux 单个参数约 128 KiB；没有这道闸，大 diff 会起不来） |
-| `collectMaxBytes` | `262144` | 评审者 stdout/stderr 的保留字节数（只用于诊断） |
-| `spillMaxBytes` | `8388608` | 上述输出的溢出落盘上限 |
-| `envPassthrough` | `[]` | 额外透传给评审进程的环境变量名（`subprocess` 默认抹掉 `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 形状的名字） |
-
-评审者字段 —— `reviewers` 里 `kind` 可以省略，按写了哪些键推断（`preset`/`executable`/
-`command` → `cli`，`provider` → `llm`，`subagentProvider`/`agentModel` → `subagent`）。
-
-<details>
-<summary><b>完整配置示例</b></summary>
-
-```yaml
-- id: review
-  name: dsh-review
-  config:
-    language: auto
-    waitMs: 180000
-    maxResultChars: 60000
-    defaultReviewers: [ codex, qwen ]
-    defaultMode: balanced
-    injectPolicy: true
-
-    # 直接用 DSH 里已配好的模型，不必在这里再抄一遍。
-    discover:
-      providers: [ bailian ]
-      exclude: [ "*embedding*", "*rerank*" ]
-      adHoc: true
-
-    agents:
-      - preset: codex
-        model: gpt-5.6-sol
-        timeoutMs: 1800000
-      - preset: claude
-        executable: /opt/homebrew/bin/claude
-        extraArgs: [ "--allowedTools", "Read,Grep,Glob" ]
-        enabled: false
-
-    models:
-      - provider: bailian
-        model: qwen3.8-max
-        label: Qwen3.8-Max
-        llm: { maxTokens: 8192, temperature: 0 }
-      - provider: bailian
-        model: glm-5.3
-        label: GLM-5.3
-
-    reviewers:
-      - id: deep-dive
-        kind: subagent
-        provider: spawn
-        agentProvider: bailian
-        agentModel: deepseek-v4.1-flash
-        enabled: false
-
-    modes:
-      quick:
-        label: 快速
-        strength: light
-        reviewers: [ qwen ]
-      balanced:
-        strength: standard
-        reviewers: [ codex, qwen ]
-        when: complex
-        minChangedLines: 50
-      deep:
-        label: 深度
-        strength: deep
-        description: "全部评审者 + 合并结论"
-        reviewers: [ codex, qwen, glm-5.3 ]
-        synthesize: true
-        synthesizeReviewer: qwen
-        when: always
-```
-
-</details>
-
-## 一次调用是怎么跑的
-
-1. **校验** —— `base` / `commit` / `instructions` 互斥；范围不能以 `-` 开头（git 会当成
-   开关）；`reviewers` 必须是字符串数组。
-2. **解析** —— 工具参数的 `reviewers` → 模式的 `reviewers` → `defaultReviewers`，再加上开关打开时的自动发现与按需指名。结果为空就报错，而不是「全部启用」；然后定工作目录（`exec.agent.session.header.cwd`）。
-3. **收集** —— 永远收集：`git status --porcelain -z -uall` 与 `--numstat`。只有选中的评审者
-   需要时才收集：完整 patch 与未跟踪新文件正文，按配置预算裁剪，并**明确写出被省略了什么**。
-4. **并发** —— 所有评审者并行跑，各自一个 AbortController 与超时。一个失败不会带倒其他。
-5. **合并** —— 一份报告：范围头、每个评审者一节（kind、目标、耗时、失败徽标、`<details>`
-   里的诊断输出）、可选的汇总、以及材料说明与配置告警的脚注。
-6. **返回** —— 同一份文本既进 `ctx.jobs` 的 job，也在 `waitMs` 内跑完时就地返回。没跑完就把
-   job id 交回去，模型用 `job_output` 收结论、`job_kill` 终止，结束时注册表会自动通知发起
-   会话。`job_output` 与就地返回**逐字节相同**，因为输出环里只放报告 —— 从不放评审者的进度
-   日志（那可能是几百 KB 的 diff 转储）。
-
-工具结果是一个小的规范化对象；UI 把它显示成标题为 `review(codex,qwen) --uncommitted` 的终端卡片。
-
-| 输出字段 | 含义 |
-| --- | --- |
-| `kind` | `completed`（已结算）或 `running`（交回了 job id） |
-| `report` | 合并后的报告正文 |
-| `jobId` | `kind: running` 时给出 |
-| `status`、`detail` | job 状态与「n/m 个评审者完成」 |
-| `reviewers` | 本次实际使用的评审者 id |
-
-## 自测
-
-`selftest.mjs` 用假 `ctx` 驱动插件本体：不起宿主进程，不跑真的 codex，也不真的调模型。
-150+ 条断言覆盖配置归一化、三种评审者、git 收集、编排、汇总、截断，以及本插件第一次真实
-评审发现的那几个问题留下的回归用例。
-
-```sh
-node selftest.mjs
-```
-
-## 设计取舍
-
-- **零依赖。** 只用 `node:fs`、`node:os`、`node:path` 和宿主服务。LLM 流是逐字段消费的，
-  没有 import `@deepseek-ai/dsh-llm`，所以 DSH 升级不会通过 peer 版本把这个插件带崩。
-- **配置错误要吵，但不要致命。** 一条写坏的评审者定义会被丢掉，并留一条告警显示在工具描述和
-  报告脚注里；只有数字和枚举会静默回退默认值。
-- **只传 argv，绝不过 shell。** 评审命令是展开后的数组交给 `ctx.subprocess`；`base`/`commit`
-  按 revision 校验，不按文本处理。
-- **diff 就是材料。** 把 diff 喂给模型，等于授予它读取这些文件的权限。私有仓库请留意这一点。
+| `defaultReviewers` | 一个都没有 | 调用没给 `reviewers` 时用哪些；空 = 不启用任何评审者 |
+| `defaultMode` | 不设 | 调用没给 `mode` 时套用的模式 |
+| `language` | `auto` | `zh` / `en` / `auto` 报告语言（`auto` 跟随你的指令） |
+| `injectPolicy` | `false` | 把各模式的 `when` 规则写进系统提示词 |
+| `agents` / `models` / `reviewers` | `[]` | 定义 CLI、模型、子智能体三类评审者 |
+| `modes` | `{}` | 命名评审模式 |
+| `discover` | 关闭 | 直接用 DSH 里的模型，不必逐个列出 |
+| `waitMs` | `120000` | 调用阻塞多久后交回 job id；`0` = 立即交回 |
+| `hardTimeoutMs` | `0` | 墙钟上限；`0` = 不限制——什么时候停由你决定 |
+| `maxResultChars` | `80000` | 报告上限；超出会截断并给出完整报告路径 |
+| `maxDiffChars` | `160000` | 需要 diff 的评审者能看到的变更正文上限 |
 
 ## 已知限制
 
-- 工作目录固定为**会话工作目录**（`exec.agent.session.header.cwd`），不能指定别的仓库。
-- 一次调用只评一种范围（未提交 / base / commit），与底层 CLI 一致。
-- `base`/`commit` 与 `instructions` 互斥 —— 这是 codex CLI 的限制，被推广到所有评审者，好让
-  参数在哪儿都一个意思。要「给某个范围加关注点」请用模式的 `prompt`。
-- 因为 codex 不接受范围开关旁边的 `PROMPT`，模式的提示词只在没给 `base`/`commit` 时才能到达
-  codex。范围本身永远保留，报告里也会写明提示词被跳过；其他 kind 任何时候都能收到。
-- 报告被截断时，全文留在 `$TMPDIR/dsh-review-*/report.md`，不会自动回收；未截断的运行会删掉
-  自己的临时目录。
-- codex 只在它的受信任目录里能跑（`~/.codex/config.toml` 的 `[projects.*]`）；插件刻意不传
-  `--skip-git-repo-check` —— 那是 codex 自己的信任闸，不该由这里代开。
-- 自动发现与按需指名都在调用时解析，所以 DSH 里删掉一个模型，下次调用它就不在评审者集合里了
-  （这正是目的：插件里没有过期的副本）。
-- `discover` 展开的是 `listModels()` 报出来的全部内容。如果某个 provider 报了上百个模型，工具
-  描述与默认集合会变得臃肿，请用 `include` / `exclude` 收窄。
-- DSH 没有通用的嵌套对象控件，所以 GUI 里的 `reviewers` / `modes` 是插件自绘的行编辑器，并保留一个原始 JSON 兜底入口。
-- 评审者是「显式启用」制：一个都不勾时工具直接报错，不会回落到「所有启用的评审者」。
-- `when` 是系统提示词里的要求，不是强制闸门。
+- 评审始终在**会话工作目录**里跑，不能指向别的仓库。
+- 一次调用只评一种范围（未提交 / 某个分支 / 某个提交），与底层 CLI 一致。范围与
+  `instructions` 不能同时给——关注点请写进模式的 `prompt`。
+- 模式的提示词只在没给范围时才能到达 codex（它的 CLI 不允许两者同时出现）；范围永远生效，
+  提示词被跳过时报告里会写明。
+- codex 只在它信任的目录里能跑（`~/.codex/config.toml`）。
+- 被截断的报告留在 `$TMPDIR/dsh-review-*/report.md`；未截断的运行会自己清理。
+
+## 开发
+
+```sh
+node selftest.mjs    # 用假宿主驱动插件：不需要 DSH、不跑 codex、不调模型
+```
 
 ## License
 
 [MIT](LICENSE)
-
----
-
-Fork 自 [dsh-codex-review](https://github.com/yutingzhao1991/dsh-codex-review)——它确立了本插件
-仍在使用的「宿主侧起子进程 + 后台 job」这套做法。
