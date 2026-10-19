@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { assertRevisionExists, collectChanges, describeCall, describeTarget } from './lib/changes.js';
 import { buildBrief, buildNativePrompt, buildPolicyText, flattenBrief } from './lib/prompt.js';
 import { composeReport, truncateText } from './lib/report.js';
-import { clampForArgv, runReviewer } from './lib/reviewers.js';
+import { checkCliVersion, clampForArgv, probeCliReviewer, reviewerEnv, runReviewer } from './lib/reviewers.js';
 import { Config, schemaAvailable, unwrapConfig } from './lib/schema.js';
 import { modePrompt, needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
 
@@ -76,6 +76,24 @@ function safeFileName(id, index) {
 
 /* ────────────────────────────── 工具元信息 ────────────────────────────── */
 
+/**
+ * 只对**含 `/` 的** `executable` 做同步存在性检查。
+ *
+ * 配置解析保持纯粹：不去 stat PATH 上的裸名字（否则 `codex` 会被当成「当前目录下的文件
+ * 不存在」而误报）。这里挡的是一类确定的问题——patch 里钉死的绝对路径已经不在了：
+ * 本机事故就是依赖重装删掉了那个文件，而工具描述仍宣告「可用评审者」，模型照着调用一路白跑。
+ */
+function missingExecutableNote(reviewer) {
+	if (reviewer.kind !== 'cli') return '';
+	const executable = reviewer.executable;
+	if (typeof executable !== 'string' || !executable.includes('/')) return '';
+	try {
+		return statSync(executable).isFile() ? '' : '（⚠️ 不是普通文件，调用会失败）';
+	} catch {
+		return '（⚠️ 可执行文件不存在，调用会失败）';
+	}
+}
+
 /** 工具描述从配置生成：模型能直接看到「有哪些评审者、哪些模式」。 */
 function buildToolDescription(settings) {
 	const lines = ['用外部评审者评审代码改动，返回它们的评审结论（findings、风险、建议）。', ''];
@@ -87,7 +105,7 @@ function buildToolDescription(settings) {
 	} else {
 		for (const reviewer of enabled) {
 			const target = reviewer.kind === 'cli' ? `可执行 ${reviewer.executable}` : `子智能体 ${reviewer.provider}`;
-			lines.push(`- \`${reviewer.id}\`（${reviewer.kind}，${reviewer.label}）：${target}`);
+			lines.push(`- \`${reviewer.id}\`（${reviewer.kind}，${reviewer.label}）：${target}${missingExecutableNote(reviewer)}`);
 		}
 	}
 
@@ -111,10 +129,11 @@ function buildToolDescription(settings) {
 		'',
 		schemaAvailable ? '配置也可以在 GUI 里改：侧边栏 Plugins → dsh-review 的行/包页面（解析与保存都由宿主负责）。' : 'GUI 表单在本部署不可用（找不到 @deepseek-ai/schemastery），配置请改 profile 的 cordis.patch.yml。',
 		'不传参数时评审工作区里 staged / unstaged / untracked 的全部改动。',
-		'参数规则：`base`、`commit`、`instructions` **三者最多给一个**（`base` 与 `commit` 互斥；给了 `base`/`commit` 就不能再给 `instructions`——codex CLI 的范围开关与 PROMPT 不能同时出现）。要「某个范围 + 附加关注点」，把关注点写进 `mode` 的提示词。',
+		'参数规则：`base` 与 `commit` **互斥**，只能给一个。`base`/`commit` 可以和 `instructions` 同时给——只要选中的评审者里有能同时收「范围 + 关注点」的（subagent 类都可以）；全是「PROMPT 与范围开关互斥」的 CLI 时会被直接拒绝，那种情况请把关注点写进 `mode` 的提示词。同时给时，收不了 instructions 的评审者只收范围（范围优先），报告脚注会点名是谁没收到。',
 		'`reviewers` 只能从上面列出的评审者里选，写别的 id 会直接报错（插件没有「按需指名模型」这条路）。',
 		'单次评审不一定穷尽（同一份改动，各评审者可能各有遗漏）：要覆盖度就用 `mode` 的深度模式，或者一次多选几个评审者。',
 		'评审通常要跑几分钟：默认**立即**返回 job id（不等待），用 job_output 读结果，跑完会自动通知；调用方可自行决定什么时候放弃。',
+		'评审者要是总是失败（换了机器、重装过依赖），先用 `doctor: true` 做一次环境自检（不评审任何改动）。',
 	);
 	return lines.join('\n');
 }
@@ -138,11 +157,15 @@ function buildParameters(settings) {
 				description: `要使用的评审者 id，只能从这些里选：${enabled.map((reviewer) => reviewer.id).join(', ') || '（当前没有启用的评审者）'}。${reviewersHint}`,
 			},
 			mode: { type: 'string', description: `评审模式（强度、提示词、评审者集合）。${modeHint}` },
-			base: { type: 'string', description: '评审当前工作区相对该分支的改动（如 "main"）。与 commit、instructions 互斥，三者最多给一个。' },
-			commit: { type: 'string', description: '评审该提交引入的改动（commit sha）。与 base、instructions 互斥，三者最多给一个。' },
+			base: { type: 'string', description: '评审当前工作区相对该分支的改动（如 "main"）。与 commit 互斥，只能给一个；可以和 instructions 同时给（前提见工具描述：需要选中的评审者里有能同时收范围与关注点的）。' },
+			commit: { type: 'string', description: '评审该提交引入的改动（commit sha）。与 base 互斥，只能给一个；可以和 instructions 同时给（前提见工具描述）。' },
 			instructions: {
 				type: 'string',
-				description: '附加评审指令，用来聚焦关注点（如「只看并发与错误处理」）。与 base、commit 互斥；这时按未提交的改动评审。',
+				description: '附加评审指令，用来聚焦关注点（如「只看并发与错误处理」）。不传 base/commit 时按未提交的改动评审；传了范围时，只有能同时收「范围 + 关注点」的评审者（subagent 类）会收到它，其余只收范围并在报告脚注里被点名。',
+			},
+			doctor: {
+				type: 'boolean',
+				description: '只做环境自检，不评审任何改动：逐个检查评审者的可执行文件能否定位、`--version` 是否可跑、子智能体的 provider 是否注册。配置疑似有问题（某个评审者总是失败、换了机器/重装过依赖）时先跑它，比发起一次真评审省事得多。',
 			},
 		},
 	};
@@ -152,9 +175,11 @@ function buildParameters(settings) {
  * 校验模型参数。值只作为独立 argv / 消息正文传递，不存在 shell 拼接；这里挡住的是
  * 无意义的形态。
  *
- * `base`/`commit` 与 `instructions` 互斥不是插件的取舍：codex CLI 自己声明
- * `[PROMPT]` 不能与 `--uncommitted`/`--base`/`--commit` 同时出现。与其让同一个参数
- * 在不同评审者上语义不一致，不如在工具层明确拒绝，把「范围 + 关注点」交给 mode。
+ * `base`/`commit` 与 `instructions` 的组合限制来自具体评审者的能力：codex 声明 `[PROMPT]`
+ * 不能与 `--base`/`--commit` 同时出现（`promptReplacesRange`），而子智能体两者都能收。
+ * 所以按**选中的评审者集合**判：只要有能同时收的（子智能体）就放行，收不了的按「范围优先」
+ * 丢掉 instructions 并在报告脚注点名；全都被限制才在工具层拒绝（起 job 之前，即时错误）。
+ * `base` 与 `commit` 则是无条件互斥——它们描述的是两个互相替代的范围。
  */
 function validateArgs(raw) {
 	const args = isRecord(raw) ? raw : {};
@@ -182,7 +207,79 @@ function validateArgs(raw) {
 		}
 		reviewers = args.reviewers;
 	}
-	return { base, commit, instructions, reviewers, mode: typeof args.mode === 'string' ? args.mode : undefined };
+	return { base, commit, instructions, reviewers, mode: typeof args.mode === 'string' ? args.mode : undefined, doctor: args.doctor === true };
+}
+
+/* ────────────────────────────── 环境自检 ────────────────────────────── */
+
+/**
+ * `review({ doctor: true })`：只回答「这套配置现在能不能跑」，不评审任何改动。
+ *
+ * 与真实执行共用同一个可执行文件解析器（{@link probeCliReviewer}），所以自检结论和实际
+ * 行为不会漂移。CLI 只跑一次 `--version`；子智能体只查 provider 是否注册——**不做模型
+ * 连通性测试**（那要真发请求，属于显式动作，这里不代劳）。
+ */
+async function buildDoctorReport(ctx, settings, cwd) {
+	const profile = typeof ctx.get === 'function' ? ctx.get('profileContext') : undefined;
+	const subagents = typeof ctx.get === 'function' ? ctx.get('subagents') : ctx.subagents;
+	const enabled = settings.reviewers.filter((reviewer) => reviewer.enabled);
+	const lines = [
+		'## dsh-review 环境自检',
+		'',
+		`- 工作目录：\`${cwd}\``,
+		typeof profile?.dir === 'string' && profile.dir.length > 0
+			? `- profile：\`${profile.dir}\`（CLI 定位会从这个 profile 的依赖里兜底找）`
+			: '- profile：拿不到 `profileContext`，CLI 只能按 PATH 与常见安装目录找',
+		`- 启用的评审者：${enabled.length} 个`,
+	];
+
+	if (enabled.length === 0) {
+		lines.push('', '没有启用任何评审者：请在插件 config 里配置 `reviewers` / `agents`，并把它选进 `defaultReviewers` 或某个模式。');
+		return lines.join('\n');
+	}
+
+	for (const reviewer of enabled) {
+		lines.push('', `### \`${reviewer.id}\`（${reviewer.kind}，${reviewer.label}）`);
+		if (reviewer.kind === 'cli') {
+			// 与真实执行共用同一份透传环境：否则 PATH 靠 envPassthrough 传进来的部署里，
+			// 自检会把「真跑得起来」的 CLI 报成没装（定位函数相同，环境不同结论一样会漂）。
+			const env = reviewerEnv(settings, reviewer);
+			const probe = await probeCliReviewer(ctx, reviewer, env);
+			if (probe.ok) {
+				lines.push(`- 定位：✅ \`${probe.executable}\``, `  - 来源：${probe.source}`);
+				// 显式探活：有超时；环境只用白名单键（凭据类变量本来就不会被带进来）。
+				const version = await checkCliVersion(ctx, probe.executable, cwd, env);
+				lines.push(`- \`--version\`：${version.ok ? '✅' : '❌'} ${version.detail}`);
+				if (!version.ok) lines.push('  - 可执行文件找到了但跑不起来：检查它是否可执行、架构是否匹配、依赖是否完整。');
+			} else {
+				lines.push(`- 定位：❌ ${probe.error}`);
+				lines.push('- 处理：把该 CLI 装成这个 profile 的**直接依赖**（preset 的 `package` 字段会自动定位），或在该评审者的 `executable` 里写绝对路径。');
+			}
+			continue;
+		}
+		if (subagents === undefined || subagents === null) {
+			lines.push('- ❌ `ctx.subagents` 服务不可用（需要 `@deepseek-ai/dsh-subagent` 与一个 provider）');
+		} else {
+			let provider;
+			try {
+				provider = typeof subagents.getProvider === 'function' ? subagents.getProvider(reviewer.provider) : undefined;
+			} catch {
+				provider = undefined;
+			}
+			lines.push(`- provider \`${reviewer.provider}\`：${provider === undefined ? '❌ 没有注册' : '✅ 已注册'}`);
+		}
+		lines.push(`- 模型：${reviewer.agentProvider ?? '(默认)'}${reviewer.agentModel === undefined ? '' : `/${reviewer.agentModel}`}（未做连通性测试）`);
+	}
+
+	lines.push(
+		'',
+		'### 说明',
+		'',
+		'- 自检不评审任何改动、不起评审者；CLI 只跑一次 `--version`。',
+		'- 子智能体的模型连通性不在自检范围内：那需要真的发一次请求。',
+		'- 工具描述里列出的评审者是**注册时**快照：宿主不会因为 profile 依赖变化而重载插件代码，配置改了以后以 `doctor` 的结果为准。',
+	);
+	return lines.join('\n');
 }
 
 /* ────────────────────────────── 运行时辅助 ────────────────────────────── */
@@ -252,9 +349,18 @@ export function apply(ctx, config) {
 		},
 		presentCall: (args) => {
 			const parsed = isRecord(args) ? args : {};
-			const ids = Array.isArray(parsed.reviewers) && parsed.reviewers.length > 0 ? parsed.reviewers.join(',') : settings.defaultReviewers?.join(',') ?? 'default';
-			const scope = typeof parsed.base === 'string' && parsed.base.trim().length > 0 ? `--base ${parsed.base.trim()}` : typeof parsed.commit === 'string' && parsed.commit.trim().length > 0 ? `--commit ${parsed.commit.trim()}` : '--uncommitted';
-			return { card: 'terminal', title: `review(${ids}) ${scope}` };
+			// 与 job 标签共用 describeCall：以前这里是第二份拼装逻辑，job 标签加了
+			// `+instructions` 而卡片标题没加，两边就此发散。
+			const raw = Array.isArray(parsed.reviewers) && parsed.reviewers.length > 0 ? parsed.reviewers : settings.defaultReviewers ?? [];
+			const ids = raw.length > 0 ? raw : ['default'];
+			return {
+				card: 'terminal',
+				title: describeCall(ids.map((id) => ({ id })), {
+					base: typeof parsed.base === 'string' ? parsed.base : '',
+					commit: typeof parsed.commit === 'string' ? parsed.commit : '',
+					instructions: typeof parsed.instructions === 'string' ? parsed.instructions : '',
+				}),
+			};
 		},
 		async execute(rawArgs, exec) {
 			// 每次调用现读配置：GUI 里 volatile 字段改完立刻生效，不必等重载。
@@ -263,6 +369,11 @@ export function apply(ctx, config) {
 			const mode = resolveMode(live, target.mode);
 			const cwd = resolveCwd(exec);
 			assertDirectory(cwd);
+			// 自检要在选评审者之前：配置坏掉（一个都没启用）时它恰恰最有用。
+			if (target.doctor === true) {
+				const report = await buildDoctorReport(ctx, live, cwd);
+				return { kind: 'completed', status: 'completed', reviewers: [], report };
+			}
 			// 解析失败就地报错，模型能马上改参数重试。
 			const reviewers = selectReviewers(live, mode, target.reviewers);
 			const owner = exec.agent?.id;
@@ -289,9 +400,15 @@ export function apply(ctx, config) {
 				...(owner === undefined ? {} : { owner }),
 				run: (job) => {
 					const controller = new AbortController();
+					// 结构化记录这次 job 是「撞了墙钟上限」还是「被取消」：评审者据此区分超时与
+					// 用户取消（两者都会 abort，只看信号分不出来）。
+					const jobStops = { timedOut: false };
 					let timer;
 					if (live.hardTimeoutMs > 0) {
-						timer = setTimeout(() => controller.abort(`超过 ${live.hardTimeoutMs}ms 硬上限`), live.hardTimeoutMs);
+						timer = setTimeout(() => {
+							jobStops.timedOut = true;
+							controller.abort(`超过 ${live.hardTimeoutMs}ms 硬上限`);
+						}, live.hardTimeoutMs);
 						timer.unref?.();
 					}
 					job.updateProgress(`reviewing (${ids.join(', ')})`);
@@ -376,6 +493,7 @@ export function apply(ctx, config) {
 											settings: live,
 											agent: exec.agent,
 											signal: controller.signal,
+											jobStops,
 											promptText,
 											reportPath: reviewer.capture === 'report' ? join(workdir, `report-${safeFileName(reviewer.id, index)}.md`) : reportPath,
 										}),
@@ -388,12 +506,15 @@ export function apply(ctx, config) {
 								if (typeof outcome.note === 'string' && outcome.note.length > 0) reportNotes.push(outcome.note);
 							}
 							// 子智能体在大 diff 上很容易烧满墙钟上限且零产出：给出可操作的下一步。
+							// 只认结构化标志 timedOut——以前对 detail 做中文正则，插件自己产出的
+							// 「超过 Xms」匹配不上（真超时静默），job 取消的 'tool call aborted'
+							// 又会误命中（给出「调高 timeoutMs」的错误建议）。
 							for (const outcome of outcomes) {
-								if (outcome.status === 'completed' || !/超时|aborted|中止/.test(String(outcome.detail ?? ''))) continue;
+								if (outcome.timedOut === undefined) continue;
 								if (reviewers.find((reviewer) => reviewer.id === outcome.id)?.kind !== 'subagent') continue;
-								reportNotes.push(`${outcome.id}：子智能体在大范围上被墙钟上限中止。这个 diff 建议只用 CLI 评审者，或调高该评审者的 \`timeoutMs\`；也可以先用 \`base\`/\`commit\` 缩小范围。`);
+								const where = outcome.timedOut === 'job' ? '被本次评审的墙钟上限（`hardTimeoutMs`）中止' : '被该评审者的 `timeoutMs` 中止';
+								reportNotes.push(`${outcome.id}：子智能体在大范围上${where}。这个 diff 建议只用 CLI 评审者，或调高对应的超时设置；也可以先用 \`base\`/\`commit\` 缩小范围。`);
 							}
-							clearInterval(heartbeat);
 							if (argvTruncated.length > 0) {
 								reportNotes.push(
 									`${[...new Set(argvTruncated)].join('、')}：提示词超过单参数 ${live.maxArgBytes} 字节上限，diff 被截断后才交给 CLI。这些评审者看到的材料比其他人少——「没有问题」不等于覆盖了全部改动；要看完整 diff 请调小 maxDiffChars 分批评审，或改用 subagent 评审者（它自己去读仓库，不受这个上限影响）。`,
@@ -427,6 +548,9 @@ export function apply(ctx, config) {
 							return { status: 'failed', detail };
 						} finally {
 							if (timer !== undefined) clearTimeout(timer);
+							// 心跳必须在**所有**出口停掉：空改动短路与失败路径以前会漏，interval 会一直
+							// 持有 job 引用，并对已结算的 job 继续写进度。
+							clearInterval(heartbeat);
 						}
 					})();
 

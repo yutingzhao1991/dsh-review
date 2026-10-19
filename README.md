@@ -68,6 +68,29 @@ rather than quietly running everything.
 CLI presets: `codex`, `claude`, `gemini`, `opencode`, `cursor`, or `custom` with your own
 command template.
 
+**Where the CLI lives.** The plugin looks, in order, at: `executable` (a PATH name or a path) →
+`~/.local/bin`, `~/.bun/bin`, `/opt/homebrew/bin`, `/usr/local/bin` → **the current profile's
+dependencies** (`node_modules/.bin/<name>`, plus the package's own bin entry when the preset
+declares one, e.g. `@openai/codex`'s `bin/codex.js`).
+
+That last step is the recommended setup: install the CLI as a **direct dependency of the profile**
+(`dsh plugin --profile <name> add <package>`). Do **not** keep pinning an absolute path in your
+patch — that is the trap we hit locally: a dependency reinstall pruned
+`node_modules/@openai/codex`, the pinned path silently went stale, and the tool description still
+advertised the reviewer as usable while every call burned a full run. Absolute paths still work
+(highest priority), but their lifetime is tied to the dependency graph.
+
+When the configuration looks wrong, run the self-check instead of a real review:
+
+```
+review({ doctor: true })
+```
+
+It checks, per reviewer, whether the executable resolves, which candidate found it, whether
+`--version` runs, and whether the subagent provider is registered. It reviews nothing, starts no
+reviewer, and does not need a git repository. Model connectivity for subagents is out of scope —
+that would need a real request.
+
 One thing worth knowing: a `subagent` inherits the parent session's model unless you set
 `agentModel`, so it is **not** automatically a second opinion — name the model explicitly if you
 want one.
@@ -162,6 +185,14 @@ knowing:
   reviewers' own instructions.
 - Truncated reports stay in `$TMPDIR/dsh-review-*/report.md`; other runs clean up after
   themselves.
+- The reviewer list in the tool description is a **registration-time snapshot**: the host does not
+  reload plugin code when the profile's dependencies change (measured: `patchReload: live` only
+  reloads the patch layer), so the description can lag behind disk. Use
+  `review({ doctor: true })` for the current truth. For the same reason, plugin code changes need
+  a host restart.
+- When a CLI's answer comes from stdout and stdout was truncated (past `collectMaxBytes`), the
+  report footnote says the tail may be missing and gives the spill path. When no executable can be
+  found, every candidate path and its failure reason is listed.
 
 ## Development
 

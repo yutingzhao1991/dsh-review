@@ -14,7 +14,7 @@
  * - 变更收集：git 摘要、diff 包按需收集、未跟踪文件正文；
  * - 编排：就地返回 / 后台返回 / 纯后台 / 失败收敛 / 汇总 / 截断 / 系统提示词注入。
  */
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -71,6 +71,8 @@ function makeHarness(options = {}) {
 	const spawn = (spec) => {
 		state.spawns.push(spec);
 		const matched = script.find((entry) => JSON.stringify(entry.argv) === JSON.stringify(spec.argv));
+		// spawnError：模拟 git 根本起不来（EACCES / 缺可执行文件），用来验证归因不会跑偏。
+		if (typeof matched?.spawnError === 'string') throw new Error(matched.spawnError);
 		const stdout = matched?.stdout ?? options.stdout ?? '';
 		const stderr = matched?.stderr ?? options.stderr ?? '';
 		const exitCode = matched?.exitCode ?? options.exitCode ?? 0;
@@ -78,12 +80,13 @@ function makeHarness(options = {}) {
 		const reportFlag = spec.argv.indexOf('--output-last-message');
 		const reportPath = reportFlag >= 0 ? spec.argv[reportFlag + 1] : undefined;
 		if (reportPath !== undefined && options.report !== undefined && options.skipReportFile !== true) writeFileSync(reportPath, options.report);
-		const reader = (text) => ({ readFrom: () => ({ text, lossy: false, nextOffset: text.length, spillPath: `/spill/${text.length}` }) });
+		const reader = (text, lossy = false, spillPath = `/spill/${text.length}`) => ({ readFrom: () => ({ text, lossy, nextOffset: text.length, spillPath }) });
 		// spawnDelayMs：把评审者做成「慢的」，用来看心跳/超时这类跟时间有关的行为。
 		const delay = options.spawnDelayMs ?? 0;
 		const done = delay > 0 ? new Promise((resolve) => setTimeout(() => resolve({ exitCode, signal: null }), delay)) : Promise.resolve({ exitCode, signal: null });
 		return {
-			collected: { stdout: reader(stdout), stderr: reader(stderr) },
+			// stdoutLossy：模拟宿主输出环截断（超过 collectMaxBytes），用来看丢失信息有没有传到结论里。
+			collected: { stdout: reader(stdout, options.stdoutLossy === true, options.stdoutSpillPath ?? `/spill/${stdout.length}`), stderr: reader(stderr) },
 			done,
 			terminate() {},
 		};
@@ -107,7 +110,9 @@ function makeHarness(options = {}) {
 			return options.services?.[serviceName];
 		},
 		subprocess: {
-			async resolveExecutable(command) {
+			async resolveExecutable(command, env) {
+				// 用例要模拟「PATH 里没有、只在 profile 里有」时替换掉这条查找。
+				if (typeof options.resolveExecutable === 'function') return options.resolveExecutable(command, env);
 				if (command.includes('no-such')) throw new Error('not found');
 				if (command.includes('/')) return command;
 				return `/fake/${command}`;
@@ -306,18 +311,40 @@ console.log('\nB. 工具描述与参数校验');
 	const description = h.definition.description;
 	check('B 描述列出评审者', description.includes('`codex`') && description.includes('`claude`'));
 	check('B 描述列出模式', description.includes('`deep`') && description.includes('彻底评审'));
-	check('B 描述强调 base/commit 与 instructions 互斥', description.includes('互斥'));
-	// 实测反馈：agent 会先撞上「base 与 commit 只能给一个」，说明这句必须写在描述里
-	check('B 描述写明三者最多给一个', description.includes('三者最多给一个'), description.slice(-500));
+	// 描述必须写清新语义：base/commit 无条件互斥；范围 + 关注点是「按评审者能力有条件放行」，
+	// 而不是过去那句「三者最多给一个」——模型按旧文案行事就永远不会尝试 base + instructions。
+	check('B 描述写明 base 与 commit 互斥', description.includes('`base` 与 `commit` **互斥**'), description.slice(-700));
+	check('B 描述写明范围+关注点按评审者能力有条件放行', description.includes('可以和 `instructions` 同时给') && description.includes('脚注'), description.slice(-700));
 	check('B 描述说明 reviewers 只能从列表里选', description.includes('只能从上面列出的评审者里选'));
 	check('B 描述说明默认立即返回 job id', description.includes('立即') && description.includes('job_output'));
 	{
 		const props = h.definition.parameters.properties;
 		check('B reviewers 参数列出可选 id', props.reviewers.description.includes('codex') && props.reviewers.description.includes('claude'), props.reviewers.description);
-		check('B base 参数说明三者最多给一个', props.base.description.includes('三者最多给一个') && props.commit.description.includes('三者最多给一个'));
+		check('B base/commit 参数说明互斥且可与 instructions 同时给', props.base.description.includes('与 commit 互斥') && props.commit.description.includes('与 base 互斥') && props.base.description.includes('instructions'), props.base.description);
+		check('B instructions 参数说明范围+关注点的条件与脚注', props.instructions.description.includes('脚注') && props.instructions.description.includes('subagent'), props.instructions.description);
 	}
-	check('B 参数含 reviewers/mode/base/commit/instructions', Object.keys(h.definition.parameters.properties).join(',') === 'reviewers,mode,base,commit,instructions');
+	check('B 参数含 reviewers/mode/base/commit/instructions/doctor', Object.keys(h.definition.parameters.properties).join(',') === 'reviewers,mode,base,commit,instructions,doctor');
+	// 描述里的可用性标注只认「含 / 的绝对路径」：本机事故是 patch 钉死的绝对路径被依赖重装
+	// 删掉，而描述仍宣告可用。裸名字走 PATH，不能在解析配置时 stat 成「当前目录下的文件不存在」。
+	{
+		const missing = await loadPlugin({ plugin: { reviewers: [{ id: 'gone', kind: 'cli', preset: 'codex', executable: '/nope/definitely-gone-bin' }] } });
+		check('B 绝对路径不存在时描述里标注', missing.definition.description.includes('⚠️ 可执行文件不存在'), missing.definition.description);
+		const bare = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] } });
+		check('B 裸名字不误报「不存在」', !bare.definition.description.includes('⚠️'), bare.definition.description);
+	}
 	check('B presentCall 是 terminal 卡片', h.definition.presentCall({ reviewers: ['codex'], base: 'main' }).title === 'review(codex) --base main');
+	// 回归（codex 评审）：卡片标题与 job 标签曾各写一份拼装，job 标签加了 instructions、卡片
+	// 没加；而且只标「有没有」不足以区分两条不同的指令。
+	{
+		const one = h.definition.presentCall({ reviewers: ['codex'], instructions: '只看并发' }).title;
+		const two = h.definition.presentCall({ reviewers: ['codex'], instructions: '只看错误处理' }).title;
+		check('B presentCall 带上 instructions', one.includes('+instructions「只看并发」'), one);
+		check('B 不同 instructions 的卡片标题不同', one !== two, `${one} | ${two}`);
+		const prefix = '只看并发与错误处理，忽略所有注释和风格建议，另外不要提性能问题';
+		const longOne = h.definition.presentCall({ reviewers: ['codex'], instructions: prefix }).title;
+		const longTwo = h.definition.presentCall({ reviewers: ['codex'], instructions: `${prefix}！` }).title;
+		check('B 长 instructions 截断后仍可区分', longOne !== longTwo && longOne.includes('#'), `${longOne} | ${longTwo}`);
+	}
 
 	await rejects('B 拒绝 base+commit', () => run(h, { base: 'main', commit: 'abc' }));
 	// 互斥按「评审者能不能同时收范围与关注点」判：codex 的 CLI 不能（PROMPT 与范围开关互斥），
@@ -652,13 +679,75 @@ console.log('\nG2. 范围校验');
 		harness: {
 			...GIT,
 			report: 'x',
-			gitScript: [...defaultGitScript(WORK), { argv: ['git', 'rev-parse', '--verify', '--quiet', 'no-such-branch-xyz^{commit}'], exitCode: 128, stderr: 'fatal: bad revision' }],
+			gitScript: [...defaultGitScript(WORK), { argv: ['git', 'rev-parse', '--verify', '--quiet', 'no-such-branch-xyz^{commit}'], exitCode: 1 }],
 		},
 	});
 	const dirsBefore = countWorkDirs();
 	await rejects('G2 无效 base 快速失败', () => run(h, { base: 'no-such-branch-xyz' }));
 	check('G2 无效 base 没有起评审者', h.state.spawns.every((spec) => spec.argv[0] !== '/fake/codex'), JSON.stringify(h.state.spawns.map((s) => s.argv[0])));
 	check('G2 无效 base 没有建临时目录', countWorkDirs() === dirsBefore, `${dirsBefore} → ${countWorkDirs()}`);
+}
+{
+	// 回归（codex 评审）：git 跑不起来 / 调用被取消 / 仓库坏了，与「revision 真的不存在」
+	// 以前被压成同一句「不是一个有效的分支或提交」，会把排查引向错误方向；取消更会静默继续
+	// （默认 waitMs=0 时后续 job 用独立 controller，不继承这里的信号）。
+	const probeArgv = ['git', 'rev-parse', '--is-inside-work-tree'];
+	const verifyArgv = (rev) => ['git', 'rev-parse', '--verify', '--quiet', `${rev}^{commit}`];
+
+	// 真实 git 的行为：找不到 → 退出码 1 且 stderr 为空；执行错误 → 128 + fatal 文案。
+	const notFound = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: 'x', gitScript: [verifyArgv('main'), { argv: verifyArgv('main'), exitCode: 1 }, ...defaultGitScript(WORK)] },
+	});
+	const notFoundError = await rejects('G2 revision 不存在仍然快速失败', () => run(notFound, { base: 'main' }));
+	check('G2 revision 不存在时明确说找不到', String(notFoundError?.message).includes('不是一个有效的分支或提交'), String(notFoundError?.message));
+
+	const spawnBroken = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: 'x', gitScript: [{ argv: probeArgv, spawnError: 'spawn git EACCES' }, ...defaultGitScript(WORK)] },
+	});
+	const spawnError = await rejects('G2 git 起不来时也快速失败', () => run(spawnBroken, { base: 'main' }));
+	check('G2 git 起不来时报「无法运行 git」而不是分支不存在', String(spawnError?.message).includes('无法运行 git') && !String(spawnError?.message).includes('不是一个有效的分支或提交'), String(spawnError?.message));
+
+	const fatal = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: 'x', gitScript: [{ argv: verifyArgv('main'), exitCode: 128, stderr: 'fatal: unable to read tree\n' }, ...defaultGitScript(WORK)] },
+	});
+	const fatalError = await rejects('G2 仓库坏了时也快速失败', () => run(fatal, { base: 'main' }));
+	check('G2 执行错误带上真实原因与退出码', String(fatalError?.message).includes('fatal: unable to read tree') && String(fatalError?.message).includes('128'), String(fatalError?.message));
+
+	const aborted = new AbortController();
+	aborted.abort();
+	const cancelled = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, report: 'x' } });
+	const cancelError = await rejects('G2 已取消的调用立即终止', () =>
+		run(cancelled, { base: 'main' }, { agent: { id: 'agent-1', session: { header: { cwd: WORK } } }, signal: aborted.signal }),
+	);
+	check('G2 取消时报「已取消」而不是分支不存在', String(cancelError?.message).includes('已取消'), String(cancelError?.message));
+
+	// 对照：非 git 目录仍然由 collectChanges 说明，不冒充「分支不存在」。
+	const noRepo = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: '结论', gitScript: [{ argv: probeArgv, exitCode: 128, stderr: 'fatal: not a git repository' }] },
+	});
+	const noRepoValue = await run(noRepo, { base: 'main' });
+	check('G2 非 git 目录不报「分支不存在」', !noRepoValue.report.includes('不是一个有效的分支或提交') && noRepoValue.report.includes('不是 git 仓库'), noRepoValue.report.slice(0, 400));
+
+	// 回归（codex 验收）：探测本身异常退出（dubious ownership / 权限 / 仓库损坏）也是
+	// 128 + stderr，不能当成「不是仓库」——那会让调用方以为这里本来就没得评，照样白起一轮。
+	const dubious = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: 'x', gitScript: [{ argv: probeArgv, exitCode: 128, stderr: 'fatal: detected dubious ownership in repository at /x\n' }, ...defaultGitScript(WORK)] },
+	});
+	const dubiousError = await rejects('G2 探测异常退出时也快速失败', () => run(dubious, { base: 'main' }));
+	check('G2 探测异常退出保留退出码与 stderr', String(dubiousError?.message).includes('dubious ownership') && String(dubiousError?.message).includes('128'), String(dubiousError?.message));
+
+	const dubiousNoRange = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, report: '结论', gitScript: [{ argv: probeArgv, exitCode: 128, stderr: 'fatal: detected dubious ownership in repository at /x\n' }, ...defaultGitScript(WORK)] },
+	});
+	const dubiousValue = await run(dubiousNoRange, {});
+	check('G2 无范围时探测异常也带真实原因', dubiousValue.report.includes('dubious ownership'), dubiousValue.report.slice(0, 500));
+	check('G2 无范围时探测异常不冒充「不是仓库」', !dubiousValue.report.includes('工作目录不是 git 仓库'), dubiousValue.report.slice(0, 500));
 }
 
 /* ────────────────────────────── G3. 范围 + 关注点 ────────────────────────────── */
@@ -708,13 +797,101 @@ console.log('\nG4. 假脚注');
 	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, report: 'x' } });
 	const value = await run(h, { base: 'main' });
 	check('G4 没有任何提示词时不报「没有传递」', !value.report.includes('没有传递'), value.report.slice(-500));
-	// 真给了 instructions 时才报，并说明是 instructions。
+	// 真给了模式提示词时才报（这条走的是 mode 的 prompt，不是 instructions）。
 	const withPrompt = await loadPlugin({
 		plugin: { agents: [{ preset: 'codex' }], modes: { deep: { strength: 'deep' } } },
 		harness: { ...GIT, report: 'x' },
 	});
 	const out = await run(withPrompt, { base: 'main', mode: 'deep' });
 	check('G4 真有模式提示词时才报', out.report.includes('模式的提示词没有传递'), out.report.slice(-600));
+}
+
+/* ────────────────────────────── G5. 环境自检（doctor） ────────────────────────────── */
+
+console.log('\nG5. 环境自检');
+{
+	// 定位成功：报出解析到的路径、来源与版本；不起评审者、不需要 git 仓库。
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { cwd: WORK, gitScript: [], stdout: 'codex-cli 9.9.9\n', resolveExecutable: async (command) => (command.includes('/') ? command : `/fake/${command}`) },
+	});
+	const value = await run(h, { doctor: true });
+	check('G5 doctor 返回 completed', value.kind === 'completed' && value.status === 'completed', JSON.stringify(value).slice(0, 160));
+	check('G5 doctor 报出定位路径与来源', value.report.includes('/fake/codex') && value.report.includes('来源：'), value.report);
+	check('G5 doctor 报出版本', value.report.includes('codex-cli 9.9.9'), value.report);
+	check('G5 doctor 不起评审者', !h.state.spawns.some((spec) => spec.argv[1] === 'exec'), JSON.stringify(h.state.spawns.map((s) => s.argv.slice(0, 2))));
+	check('G5 doctor 不碰 git', !h.state.spawns.some((spec) => spec.argv[0] === 'git'), JSON.stringify(h.state.spawns.map((s) => s.argv.slice(0, 2))));
+}
+{
+	// 定位失败 + 子智能体 provider 已注册：失败要给处理办法，别只说「不行」。
+	const h = await loadPlugin({
+		plugin: {
+			reviewers: [
+				{ id: 'gone', kind: 'cli', preset: 'codex', executable: '/nope/gone-bin' },
+				{ id: 'deep', kind: 'subagent', provider: 'spawn', agentProvider: 'bailian', agentModel: 'm1' },
+			],
+		},
+		harness: {
+			...GIT,
+			services: { subagents: { getProvider: (name) => (name === 'spawn' ? { name } : undefined) } },
+			resolveExecutable: async (command) => {
+				if (!command.includes('/')) throw new Error('not found in PATH');
+				if (!existsSync(command)) throw new Error('not an executable file');
+				return command;
+			},
+		},
+	});
+	const value = await run(h, { doctor: true });
+	check('G5 doctor 报出定位失败', value.report.includes('定位：❌') && value.report.includes('/nope/gone-bin'), value.report);
+	check('G5 doctor 给出处理办法', value.report.includes('直接依赖'), value.report);
+	check('G5 doctor 检查 subagent provider', value.report.includes('provider `spawn`：✅ 已注册'), value.report);
+	check('G5 doctor 说明未做连通性测试', value.report.includes('未做连通性测试'), value.report);
+}
+{
+	// provider 没注册：明确 ❌，而不是让人以为配置没问题。
+	const h = await loadPlugin({
+		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] },
+		harness: { ...GIT, services: { subagents: { getProvider: () => undefined } } },
+	});
+	const value = await run(h, { doctor: true });
+	check('G5 doctor 报出 provider 未注册', value.report.includes('❌ 没有注册'), value.report);
+}
+{
+	// 一个评审者都没有时，doctor 恰恰最有用——不能先撞上「没有启用任何评审者」的错误。
+	const h = await loadPlugin({ plugin: { reviewers: [] } });
+	const value = await run(h, { doctor: true });
+	check('G5 没有评审者时 doctor 仍可用', value.status === 'completed' && value.report.includes('没有启用任何评审者'), value.report.slice(0, 400));
+}
+{
+	// 回归（codex 验收）：doctor 用空环境定位，而真实执行用的是 envPassthrough 白名单——
+	// PATH 靠透传传入的部署里，自检会把「真跑得起来」的 CLI 报成没装。
+	// 两层白名单（settings 级 + reviewer 级）都要生效，`--version` 那次 spawn 也要带同一份环境。
+	process.env.DSH_REVIEW_TEST_PATH = '/custom/bin';
+	process.env.DSH_REVIEW_TEST_REVIEWER = '/reviewer/bin';
+	try {
+		const h = await loadPlugin({
+			plugin: {
+				envPassthrough: ['DSH_REVIEW_TEST_PATH'],
+				reviewers: [{ id: 'codex', kind: 'cli', preset: 'codex', envPassthrough: ['DSH_REVIEW_TEST_REVIEWER'] }],
+			},
+			harness: {
+				cwd: WORK,
+				gitScript: [],
+				stdout: 'codex-cli 1.2.3\n',
+				resolveExecutable: async (command, env) => {
+					if (env?.DSH_REVIEW_TEST_PATH === '/custom/bin' && env?.DSH_REVIEW_TEST_REVIEWER === '/reviewer/bin') return '/custom/bin/codex';
+					throw new Error(`not found in PATH (env=${JSON.stringify(env)})`);
+				},
+			},
+		});
+		const value = await run(h, { doctor: true });
+		check('G5 doctor 定位用两层透传白名单', value.report.includes('/custom/bin/codex'), value.report);
+		const versionSpawn = h.state.spawns.find((spec) => spec.argv[1] === '--version');
+		check('G5 doctor 的 --version 也带同一份环境', versionSpawn?.env?.DSH_REVIEW_TEST_PATH === '/custom/bin' && versionSpawn?.env?.DSH_REVIEW_TEST_REVIEWER === '/reviewer/bin', JSON.stringify(versionSpawn?.env));
+	} finally {
+		delete process.env.DSH_REVIEW_TEST_PATH;
+		delete process.env.DSH_REVIEW_TEST_REVIEWER;
+	}
 }
 
 /* ────────────────────────────── H. 回归（真实评审发现的问题） ────────────────────────────── */
@@ -734,6 +911,309 @@ console.log('\nH. 回归');
 	// 评审包正文喂给会读包的 CLI 评审者，从它的 stdin 里看。
 	const packet = h.state.spawns.map((spec) => spec.stdio?.stdin?.data ?? '').join('\n');
 	check('H 未跟踪文件按仓库根路径读到正文', packet.includes('export const b = 2;'), packet.slice(-300));
+}
+{
+	// 回归（codex 评审）：未跟踪文件的**行数统计**曾按 cwd 解析路径。porcelain 的路径一律
+	// 相对仓库根，子目录会话下会拼成 <cwd>/src/b.js 而读不到，规模静默显示成 +0。
+	const subdir = join(WORK, 'src');
+	const script = defaultGitScript(subdir).map((entry) =>
+		entry.argv.join(' ') === 'git rev-parse --show-toplevel' ? { ...entry, stdout: `${WORK}\n` } : entry,
+	);
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { cwd: subdir, gitScript: script, report: '结论' },
+	});
+	const value = await run(h, {});
+	check('H 子目录会话：未跟踪行数按仓库根解析', value.report.includes('已按 1 行新增计入规模'), value.report.slice(0, 400));
+}
+{
+	// 回归（codex 评审）：未跟踪文件的正文曾整份 `readFileSync` 进内存来数行——一个没被
+	// 忽略的大文件就能卡死宿主事件循环，连评审者的超时定时器都跑不起来。统计现在有字节
+	// 上限，读不全就把行数标成「至少 N」，而不是假装精确。
+	const huge = join(WORK, 'huge.txt');
+	const HUGE_LINES = 200_000;
+	writeFileSync(huge, 'x\n'.repeat(HUGE_LINES));
+	const script = defaultGitScript(WORK).map((entry) =>
+		entry.argv.includes('status') ? { ...entry, stdout: ' M src/a.js\0?? src/b.js\0?? huge.txt\0' } : entry,
+	);
+	try {
+		const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { cwd: WORK, gitScript: script, report: '结论' } });
+		const value = await run(h, {});
+		const matched = value.report.match(/已按至少 (\d+) 行新增计入规模/);
+		check('H 超大未跟踪文件：行数标成「至少」', matched !== null, value.report.slice(0, 500));
+		const counted = matched === null ? Number.NaN : Number.parseInt(matched[1], 10);
+		check('H 超大未跟踪文件：只统计上限内的字节', Number.isFinite(counted) && counted > 0 && counted < HUGE_LINES, String(counted));
+	} finally {
+		rmSync(huge, { force: true });
+	}
+}
+{
+	// 回归（codex 验收）：二进制文件检测到 NUL 就 continue，读过的字节没计入**总**预算——
+	// 一堆未跟踪的二进制产物每个都能读满单文件上限，总量限制形同虚设。
+	const binDir = join(WORK, 'bin-artifacts');
+	mkdirSync(binDir, { recursive: true });
+	const blob = Buffer.alloc(300 * 1024, 0); // 全 NUL：首块即判为二进制
+	const binaries = [];
+	for (let index = 0; index < 20; index += 1) {
+		writeFileSync(join(binDir, `blob-${index}.bin`), blob);
+		binaries.push(`bin-artifacts/blob-${index}.bin`);
+	}
+	writeFileSync(join(binDir, 'tail.txt'), 'l1\nl2\nl3\nl4\nl5\n');
+	const script = defaultGitScript(WORK).map((entry) =>
+		entry.argv.includes('status') ? { ...entry, stdout: ` M src/a.js\0?? ${binaries.join('\0?? ')}\0?? bin-artifacts/tail.txt\0` } : entry,
+	);
+	try {
+		const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { cwd: WORK, gitScript: script, report: '结论' } });
+		const value = await run(h, {});
+		// 20 × 256 KiB = 5 MiB > 4 MiB 预算：二进制把预算吃光，后面的 tail.txt 不再被读。
+		// 旧实现不记账，会一路读到 tail.txt 并把它的 5 行算进规模（+15 而不是 +10）。
+		check('H 二进制文件也计入读取总预算', value.report.includes('+10 / -2'), value.report.slice(0, 400));
+		check('H 预算吃光后不再统计后续文件', !value.report.includes('已按'), value.report.slice(0, 400));
+	} finally {
+		rmSync(binDir, { recursive: true, force: true });
+	}
+}
+{
+	// 回归（codex 评审）：可执行文件只在 PATH 与四个固定目录里找，于是只能把 profile 里的
+	// 绝对路径写进 patch——依赖一重装就静默断链（本机事故）。现在按 preset 的 package 在
+	// **当前 profile** 里兜底定位，锚点只认宿主给的 profileContext。
+	const profileDir = join(WORK, 'fake-profile');
+	mkdirSync(join(profileDir, 'node_modules', '.bin'), { recursive: true });
+	writeFileSync(join(profileDir, 'node_modules', '.bin', 'codex'), '#!/bin/sh\n');
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: {
+			...GIT,
+			report: '结论',
+			services: { profileContext: { dir: profileDir } },
+			// 模拟真实情况：PATH 里没有 codex，绝对路径必须真的存在才认。
+			resolveExecutable: async (command) => {
+				if (!command.includes('/')) throw new Error('not found in PATH');
+				if (!existsSync(command)) throw new Error('not an executable file');
+				return command;
+			},
+		},
+	});
+	const value = await run(h, {});
+	const argv = h.state.spawns.find((spec) => spec.argv[0].endsWith('codex'))?.argv ?? [];
+	check('H 按包名在 profile 的 .bin 里定位 CLI', argv[0] === join(profileDir, 'node_modules', '.bin', 'codex'), String(argv[0]));
+	check('H 包定位成功后照常出结论', value.status === 'completed', JSON.stringify(value).slice(0, 200));
+}
+{
+	// 包内 bin 子路径是第二候选：.bin 入口缺失（非 npm/pnpm 安装、或只有包目录）时仍要能找到。
+	// 同时锁定「不能解析包根」——@openai/codex 没有模块入口，解析包根必失败。
+	const profileDir = join(WORK, 'fake-profile-2');
+	mkdirSync(join(profileDir, 'node_modules', '@openai', 'codex', 'bin'), { recursive: true });
+	writeFileSync(join(profileDir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js'), '// codex\n');
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: {
+			...GIT,
+			report: '结论',
+			services: { profileContext: { dir: profileDir } },
+			resolveExecutable: async (command) => {
+				if (!command.includes('/')) throw new Error('not found in PATH');
+				if (!existsSync(command)) throw new Error('not an executable file');
+				return command;
+			},
+		},
+	});
+	const value = await run(h, {});
+	const argv = h.state.spawns.find((spec) => spec.argv[0].endsWith('codex.js'))?.argv ?? [];
+	check('H 包内 bin 子路径兜底定位', argv[0] === join(profileDir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js'), String(argv[0]));
+	check('H 包内 bin 定位成功后照常出结论', value.status === 'completed', JSON.stringify(value).slice(0, 200));
+}
+{
+	// 锚点不可信就不该用：没有 profileContext 时，不得到工作目录（或其他 profile）里乱找。
+	const rogue = join(WORK, 'node_modules', '.bin');
+	mkdirSync(rogue, { recursive: true });
+	writeFileSync(join(rogue, 'codex'), '#!/bin/sh\n');
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: {
+			...GIT,
+			report: '结论',
+			resolveExecutable: async (command) => {
+				if (!command.includes('/')) throw new Error('not found in PATH');
+				if (!existsSync(command)) throw new Error('not an executable file');
+				return command;
+			},
+		},
+	});
+	const value = await run(h, {});
+	const argv = h.state.spawns.find((spec) => spec.argv[0].endsWith('codex'))?.argv ?? [];
+	check('H 没有 profileContext 时不从工作目录找 CLI', argv.length === 0 && value.status === 'failed', String(argv[0]));
+	check('H 找不到时说明 fell back 的尝试过哪些路径', value.report.includes('找不到可执行文件') && value.report.includes('package'), value.report.slice(0, 300));
+}
+{
+	// 回归（codex 评审）：gitFailed 以前只有 numstat 循环置位。status 失败时既不置位也不记
+	// note，numstat 恰好 0 文件就会报「未检测到需要评审的改动」——git 坏了却报告没东西可评。
+	const clean = [
+		{ argv: ['git', 'rev-parse', '--is-inside-work-tree'], stdout: 'true\n' },
+		{ argv: ['git', 'rev-parse', '--show-toplevel'], stdout: `${WORK}\n` },
+	];
+	const broken = [
+		...clean,
+		{ argv: ['git', '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-z', '-uall'], stdout: '', stderr: 'fatal: index file corrupt\n', exitCode: 128 },
+	];
+	const h = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, gitScript: broken, report: '结论' } });
+	const value = await run(h, {});
+	check('H git status 失败时不报「没有改动可评」', !value.report.includes('未检测到需要评审的改动'), value.report.slice(0, 500));
+	check('H git status 失败记进材料说明', value.report.includes('`git status` 失败') && value.report.includes('index file corrupt'), value.report.slice(0, 700));
+	check('H git status 失败仍然照常评审', value.report.includes('结论'), value.report.slice(0, 500));
+
+	// 对照：同样的「无改动」脚本但 status 正常，必须仍然短路（别把短路一起改坏）。
+	const ok = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, gitScript: [...clean, { argv: ['git', '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-z', '-uall'], stdout: '' }], report: '结论' } });
+	const okValue = await run(ok, {});
+	check('H git 正常且无改动时仍短路', okValue.report.includes('未检测到需要评审的改动'), okValue.report.slice(0, 300));
+}
+{
+	// 回归（codex 评审）：心跳 setInterval 只在成功路径 clearInterval；空改动短路与失败路径
+	// 会漏掉，interval 一直持有 job 引用并对已结算的 job 写进度。用 spy 盯住两个全局函数。
+	const realSetInterval = globalThis.setInterval;
+	const realClearInterval = globalThis.clearInterval;
+	let created = 0;
+	let cleared = 0;
+	globalThis.setInterval = (...args) => {
+		created += 1;
+		return realSetInterval(...args);
+	};
+	globalThis.clearInterval = (handle) => {
+		cleared += 1;
+		return realClearInterval(handle);
+	};
+	try {
+		const clean = [
+			{ argv: ['git', 'rev-parse', '--is-inside-work-tree'], stdout: 'true\n' },
+			{ argv: ['git', 'rev-parse', '--show-toplevel'], stdout: `${WORK}\n` },
+			{ argv: ['git', '-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-z', '-uall'], stdout: '' },
+		];
+		const shortCircuit = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, gitScript: clean, report: '结论' } });
+		created = 0;
+		cleared = 0;
+		await run(shortCircuit, {});
+		check('H 空改动短路时也停掉心跳', created === 1 && cleared === 1, `created=${created} cleared=${cleared}`);
+
+		const failing = await loadPlugin({
+			plugin: { reviewers: [{ id: 'ghostbin', kind: 'cli', preset: 'custom', executable: 'no-such-bin-xyz', command: ['{exe}', '{prompt}'] }] },
+			harness: { ...GIT },
+		});
+		created = 0;
+		cleared = 0;
+		await run(failing, {});
+		// 注意：这条在旧实现下也通过——评审者失败走的是正常收尾（内联 clearInterval 会执行），
+		// 真正泄漏的是上面那条短路路径。catch 路径目前没有可达的触发点（try 内所有可能抛的
+		// await 都带 .catch），移到 finally 是为了让「所有出口」这条不变量由结构保证而不是靠枚举。
+		check('H 评审者失败后也不留下心跳', created === 1 && cleared === 1, `created=${created} cleared=${cleared}`);
+	} finally {
+		globalThis.setInterval = realSetInterval;
+		globalThis.clearInterval = realClearInterval;
+	}
+}
+{
+	// 回归（codex 评审）：判超时靠对 detail 做中文正则。插件自己产的中止原因（`超过 Xms`）
+	// 反而匹配不上（真超时静默不给建议），job 取消的 'tool call aborted' 又会误命中（给出
+	// 「调高 timeoutMs」的错误建议）。现在只认结构化标志，且区分「评审者超时 / job 硬上限 / 取消」。
+	const hanging = {
+		subagents: {
+			getProvider: () => ({ name: 'spawn' }),
+			async start(name, request) {
+				// 报错文案刻意不含「超时 / aborted / 中止」——真实服务侧的措辞不由插件决定，
+				// 旧实现正是靠这些关键词猜超时，猜不中就静默。
+				const result = new Promise((_, reject) => {
+					const fail = () => reject(new Error(`子智能体已停止：${String(request.signal?.reason)}`));
+					// 信号可能在我们订阅之前就已经 abort 了（取消发生在子智能体起来之前）。
+					if (request.signal?.aborted === true) fail();
+					else request.signal?.addEventListener('abort', fail, { once: true });
+				});
+				return { result, dispose: async () => {} };
+			},
+		},
+	};
+	const reviewerConfig = [{ id: 'deep', kind: 'subagent', provider: 'spawn', timeoutMs: 40 }];
+
+	// 插件里的超时定时器是 `unref()` 的——真实运行时由子进程/网络 I/O 撑住事件循环，自测里
+	// 必须自己撑住，否则 Node 会在定时器触发前判定「无事可做」，直接报未结算的顶层 await。
+	const keepAlive = setInterval(() => {}, 10);
+	try {
+		const ownTimeout = await loadPlugin({ plugin: { reviewers: reviewerConfig }, harness: { ...GIT, services: hanging } });
+		const ownValue = await run(ownTimeout, {});
+		check('H 评审者超时：给出结构化建议', ownValue.report.includes('被该评审者的 `timeoutMs` 中止'), ownValue.report.slice(-600));
+
+		const jobTimeout = await loadPlugin({ plugin: { hardTimeoutMs: 40, reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] }, harness: { ...GIT, services: hanging } });
+		const jobValue = await run(jobTimeout, {});
+		check('H job 硬上限：建议指向 hardTimeoutMs 而不是 timeoutMs', jobValue.report.includes('被本次评审的墙钟上限（`hardTimeoutMs`）中止'), jobValue.report.slice(-600));
+
+		// 用户取消（job_kill / 工具调用被中断）：不是超时，不能给「调高超时」的建议。
+		const killed = await loadPlugin({ plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', timeoutMs: 60_000 }] }, harness: { ...GIT, services: hanging, wait: 'running' } });
+		const running = await run(killed, {});
+		killed.state.jobs.get(running.jobId).hooks.cancel('tool call aborted');
+		const record = killed.state.jobs.get(running.jobId);
+		await record.settledPromise;
+		const killedText = record.chunks.map((chunk) => chunk.text).join('\n');
+		check('H 用户取消不误报超时建议', !killedText.includes('timeoutMs') && !killedText.includes('hardTimeoutMs'), killedText.slice(0, 300));
+
+		// 竞争（codex 验收）：用户先取消，但子智能体清理慢（60ms）而评审者上限只有 20ms——
+		// 后到的定时器不能改写「已经发生的取消」，否则照样给出错误的调高超时建议。
+		const slowCleanup = {
+			subagents: {
+				getProvider: () => ({ name: 'spawn' }),
+				async start(name, request) {
+					const result = new Promise((_, reject) => {
+						const fail = () => setTimeout(() => reject(new Error(`子智能体已停止：${String(request.signal?.reason)}`)), 60);
+						if (request.signal?.aborted === true) fail();
+						else request.signal?.addEventListener('abort', fail, { once: true });
+					});
+					return { result, dispose: async () => {} };
+				},
+			},
+		};
+		const raced = await loadPlugin({ plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', timeoutMs: 20 }] }, harness: { ...GIT, services: slowCleanup, wait: 'running' } });
+		const racedRunning = await run(raced, {});
+		raced.state.jobs.get(racedRunning.jobId).hooks.cancel('tool call aborted');
+		const racedRecord = raced.state.jobs.get(racedRunning.jobId);
+		await racedRecord.settledPromise;
+		const racedText = racedRecord.chunks.map((chunk) => chunk.text).join('\n');
+		check('H 取消先发生时不改写中止原因', !racedText.includes('timeoutMs') && !racedText.includes('hardTimeoutMs'), racedText.slice(0, 400));
+
+		// 反方向竞争（codex 验收指出未覆盖）：评审者自己的上限先到（20ms），job 硬上限随后
+		// （40ms）才到——先到的原因同样不能被后来的入口改写。
+		const reverse = await loadPlugin({
+			plugin: { hardTimeoutMs: 40, reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', timeoutMs: 20 }] },
+			harness: { ...GIT, services: slowCleanup },
+		});
+		const reverseValue = await run(reverse, {});
+		check('H 评审者超时先发生时不被上游改写', reverseValue.report.includes('被该评审者的 `timeoutMs` 中止'), reverseValue.report.slice(-600));
+	} finally {
+		clearInterval(keepAlive);
+	}
+}
+{
+	// 回归（codex 评审）：stdout 被截断时（超过 collectMaxBytes，结论常常正好在尾部）脚注仍
+	// 宣称「内容完整」，且 spillPath 被丢掉；capture: stdout 的预设（claude / gemini）连提示
+	// 都没有。两条路都要把丢失信息带出来。
+	const fallback = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, stdout: '结论在 stdout 里', skipReportFile: true, stdoutLossy: true, stdoutSpillPath: '/tmp/spill-stdout.txt' },
+	});
+	const fallbackValue = await run(fallback, {});
+	check('H stdout 回退被截断时写明截断', fallbackValue.report.includes('stdout 已被截断'), fallbackValue.report.slice(-500));
+	check('H stdout 回退被截断时给出 spillPath', fallbackValue.report.includes('/tmp/spill-stdout.txt'), fallbackValue.report.slice(-500));
+	check('H stdout 回退被截断时不再宣称内容完整', !fallbackValue.report.includes('内容完整'), fallbackValue.report.slice(-500));
+
+	const captureStdout = await loadPlugin({
+		plugin: { agents: [{ preset: 'claude' }] },
+		harness: { ...GIT, stdout: 'claude 的结论', stdoutLossy: true, stdoutSpillPath: '/tmp/spill-claude.txt' },
+	});
+	const captureValue = await run(captureStdout, {});
+	check('H capture: stdout 被截断也写明', captureValue.report.includes('stdout 已被截断') && captureValue.report.includes('/tmp/spill-claude.txt'), captureValue.report.slice(-500));
+
+	const intact = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }] },
+		harness: { ...GIT, stdout: '结论在 stdout 里', skipReportFile: true },
+	});
+	const intactValue = await run(intact, {});
+	check('H stdout 未被截断时明确说未截断', intactValue.report.includes('stdout 未被截断'), intactValue.report.slice(-500));
 }
 {
 	// 两个 capture: report 的评审者，id 洗过之后同名，也不能互相覆盖结论文件。

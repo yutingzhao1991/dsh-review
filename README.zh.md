@@ -61,6 +61,25 @@ review({ instructions: "只看并发与错误处理" })
 
 CLI 预设：`codex`、`claude`、`gemini`、`opencode`、`cursor`，或 `custom` 自定义命令模板。
 
+**CLI 装在哪**：插件按这个顺序找——`executable`（PATH 上的名字或路径）→ `~/.local/bin`、
+`~/.bun/bin`、`/opt/homebrew/bin`、`/usr/local/bin` → **当前 profile 的依赖**（`node_modules/.bin/<名字>`，
+以及预设声明的包内 bin，如 `@openai/codex` 的 `bin/codex.js`）。
+
+最后那条是给你的建议路径：把 CLI 装成 profile 的**直接依赖**（`dsh plugin --profile <name> add <包名>`），
+定位会一直有效。**不要再把绝对路径写进 patch**——本机就踩过这个坑：依赖重装把
+`node_modules/@openai/codex` 裁掉后，钉死的绝对路径静默失效，工具描述还宣告它可用，
+模型照着调用一路白跑。绝对路径仍然支持（优先级最高），但它的生命周期跟着依赖图走。
+
+配置看着不对时先跑一次自检，别发起真评审：
+
+```
+review({ doctor: true })
+```
+
+它逐个检查可执行文件能否定位、来源是哪条候选、`--version` 能否跑起来、子智能体的 provider
+是否注册；不评审任何改动、不起评审者，也不需要 git 仓库。子智能体的**模型连通性**不在自检范围内
+（那要真发一次请求）。
+
 有一点值得知道：`subagent` 不写 `agentModel` 就会继承父会话的模型，所以它**不自动等于**「第二
 意见」——想要独立意见就显式指定模型。
 
@@ -145,6 +164,11 @@ config:
   「什么都没评」的批次。
 - 报告骨架（标题、脚注、错误信息）目前固定中文；`language` 只影响评审者自己的指令。
 - 被截断的报告留在 `$TMPDIR/dsh-review-*/report.md`；未截断的运行会自己清理。
+- 工具描述里的评审者列表是**注册时**的快照：宿主不会因为 profile 的依赖变化而重载插件代码
+  （实测 `patchReload: live` 只重载 patch 层），所以描述可能滞后于磁盘现状。要准的当前状态
+  用 `review({ doctor: true })`。同一原因，改完插件代码需要重启宿主才生效。
+- CLI 的结论取自 stdout 且 stdout 被截断（超过 `collectMaxBytes`）时，报告脚注会写明可能缺尾部
+  并给出 spill 路径；找不到可执行文件时会列出所有尝试过的候选路径与各自失败原因。
 
 ## 开发
 
