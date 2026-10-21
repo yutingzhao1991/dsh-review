@@ -28,7 +28,7 @@ import { assertRevisionExists, collectChanges, describeCall, describeTarget } fr
 import { buildBrief, buildNativePrompt, buildPolicyText, flattenBrief } from './lib/prompt.js';
 import { composeReport, truncateText } from './lib/report.js';
 import { checkCliVersion, clampForArgv, probeCliReviewer, reviewerEnv, runReviewer } from './lib/reviewers.js';
-import { Config, schemaAvailable, unwrapConfig } from './lib/schema.js';
+import { Config, schemaAvailable, schemaSource, unwrapConfig } from './lib/schema.js';
 import { modePrompt, needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
 
 /** 加载器诊断用的插件名；`cordis.patch.yml` 里的 id 是 `review`。 */
@@ -232,6 +232,9 @@ async function buildDoctorReport(ctx, settings, cwd) {
 			? `- profile：\`${profile.dir}\`（CLI 定位会从这个 profile 的依赖里兜底找）`
 			: '- profile：拿不到 `profileContext`，CLI 只能按 PATH 与常见安装目录找',
 		`- 启用的评审者：${enabled.length} 个`,
+		schemaAvailable
+			? `- GUI 配置表单：✅ 已加载 Config schema（schemastery：\`${schemaSource ?? '插件依赖'}\`）`
+			: '- GUI 配置表单：❌ 找不到 `@deepseek-ai/schemastery`，GUI 不会显示配置表单（配置请改 profile 的 cordis.patch.yml，或把依赖装进 profile）',
 	];
 
 	if (enabled.length === 0) {

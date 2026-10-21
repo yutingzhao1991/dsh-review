@@ -14,9 +14,10 @@
  * - 变更收集：git 摘要、diff 包按需收集、未跟踪文件正文；
  * - 编排：就地返回 / 后台返回 / 纯后台 / 失败收敛 / 汇总 / 截断 / 系统提示词注入。
  */
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, readdirSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const PLUGIN = new URL('./index.js', import.meta.url).href;
 
@@ -2197,6 +2198,43 @@ console.log('\nK. GUI 配置的宿主半边');
 		// 表单打开时数值/开关字段应该有真实值可显示
 		check('K 数值与开关默认值可显示', meta(['waitMs']).default === 0 && meta(['injectPolicy']).default === false && meta(['language']).default === 'auto');
 		check('K 硬超时默认 0（不限制）', meta(['hardTimeoutMs']).default === 0);
+	}
+}
+
+/* ────────────────────────────── L. schema 解析 ────────────────────────────── */
+
+console.log('\nL. schema 解析');
+{
+	// 回归：全局安装的 `dsh` 是指向安装目录的符号链接。旧实现只取 dirname(argv[1])，
+	// 落在 `.bin` 里找不到宿主依赖，Config 直接变 undefined，GUI 配置页随之消失。
+	const { schemaSource } = await import(new URL('./lib/schema.js', import.meta.url).href);
+	if (typeof schemaSource !== 'string') {
+		check('L 本机 schemastery 可解析', false, '本机也找不到 schemastery，跳过符号链接回归');
+	} else {
+		const root = mkdtempSync(join(tmpdir(), 'dsh-review-schema-'));
+		try {
+			const packageRoot = dirname(dirname(schemaSource));
+			const hostLib = join(root, 'host', 'node_modules', '@deepseek-ai', 'dsh', 'lib');
+			mkdirSync(hostLib, { recursive: true });
+			writeFileSync(join(hostLib, 'bin.js'), '');
+			symlinkSync(packageRoot, join(root, 'host', 'node_modules', '@deepseek-ai', 'schemastery'), 'dir');
+			mkdirSync(join(root, 'bin'), { recursive: true });
+			const link = join(root, 'bin', 'dsh');
+			symlinkSync(join(hostLib, 'bin.js'), link);
+			mkdirSync(join(root, 'home'), { recursive: true });
+			mkdirSync(join(root, 'cwd'), { recursive: true });
+			const script = [
+				`process.argv[1] = ${JSON.stringify(link)};`,
+				`process.env.DSH_HOME = ${JSON.stringify(join(root, 'home'))};`,
+				`process.chdir(${JSON.stringify(join(root, 'cwd'))});`,
+				`const m = await import(${JSON.stringify(new URL('./lib/schema.js', import.meta.url).href)});`,
+				`process.stdout.write(m.schemaAvailable ? 'yes' : 'no');`,
+			].join('\n');
+			const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' });
+			check('L 符号链接的 dsh bin 也能找到 schemastery', result.status === 0 && result.stdout === 'yes', `${result.status} ${result.stdout} ${result.stderr}`);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	}
 }
 

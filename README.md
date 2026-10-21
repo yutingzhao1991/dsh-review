@@ -91,9 +91,10 @@ review({ doctor: true })
 
 It checks, per reviewer, whether the executable resolves, which candidate found it, whether
 `--version` runs, whether the subagent provider is registered, and whether the host exposes the
-`startActivation()` interface this plugin uses. It reviews nothing, starts no reviewer, and does
-not need a git repository. Model connectivity for subagents is out of scope — that would need a
-real request.
+`startActivation()` interface this plugin uses. It also reports whether the GUI config schema
+resolved (`@deepseek-ai/schemastery`) and where it came from. It reviews nothing, starts no
+reviewer, and does not need a git repository. Model connectivity for subagents is out of scope —
+that would need a real request.
 
 One thing worth knowing: a `subagent` inherits the parent session's model unless you set
 `agentModel`, so it is **not** automatically a second opinion — name the model explicitly if you
