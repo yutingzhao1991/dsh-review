@@ -35,6 +35,9 @@ dsh plugin --profile web add ~/code/github/dsh-review     # web 换成你的 pro
 
 装完**重启宿主**。升级同理：`git pull` 之后重启。
 
+需要 **DSH 0.2.1 或更新版本**。插件在 manifest 里用 `engines.dsh` 声明了这一点，旧宿主会直接拒绝
+安装或激活，而不是等到真跑评审时才在子智能体启动那一步失败。
+
 ## 怎么用
 
 ```js
@@ -57,7 +60,7 @@ review({ instructions: "只看并发与错误处理" })
 | 类型 | 跑什么 | 自己会读代码吗 | 依赖 |
 | --- | --- | --- | --- |
 | `cli` | 你已经信得过的编码智能体 | 看预设（codex 会自己读仓库） | 本机装了那个 CLI |
-| `subagent` | DSH 子智能体 | 会，它有工具 | 一个 subagent provider |
+| `subagent` | DSH 子智能体 | 会，它有工具 | 一个 subagent 服务（默认 `spawn`） |
 
 CLI 预设：`codex`、`claude`、`gemini`、`opencode`、`cursor`，或 `custom` 自定义命令模板。
 
@@ -77,14 +80,18 @@ review({ doctor: true })
 ```
 
 它逐个检查可执行文件能否定位、来源是哪条候选、`--version` 能否跑起来、子智能体的 provider
-是否注册；不评审任何改动、不起评审者，也不需要 git 仓库。子智能体的**模型连通性**不在自检范围内
-（那要真发一次请求）。
+是否注册，以及宿主有没有本插件依赖的 `startActivation()` 接口；不评审任何改动、不起评审者，也不需要
+git 仓库。子智能体的**模型连通性**不在自检范围内（那要真发一次请求）。
 
 有一点值得知道：`subagent` 不写 `agentModel` 就会继承父会话的模型，所以它**不自动等于**「第二
 意见」——想要独立意见就显式指定模型。
 
-子智能体默认带两道保险：**不给它 `review` 工具**（免得评审者再起评审者），以及 **30 分钟墙钟上限**
-（`timeoutMs` 按评审者覆盖；`hardTimeoutMs` 仍然限制整次调用）。运行期间会报进度，跑得久也不像卡住。
+子智能体默认带 **30 分钟墙钟上限**（`timeoutMs` 按评审者覆盖；`hardTimeoutMs` 仍然限制整次调用）。
+递归由宿主的委派深度预算兜底（默认 1），所以评审者通常无法再起子智能体。运行期间会报进度，
+跑得久也不像卡住。
+
+DSH 0.2.1 起，persona 与工具限制不再由子智能体启动请求传入：把它们配进一个 **Agent Preset**，
+再用 `agentPreset` 选中。旧的 `persona` / `toolFilter` 会给出迁移告警，而不是静默失效。
 
 这里刻意**没有**「把 diff 丢给一个裸模型」这种类型：能自己打开仓库的评审者，比只看到手头材料的
 更有价值。
@@ -100,13 +107,19 @@ review({ doctor: true })
     reviewers:
       - id: deep-dive
         kind: subagent
-        provider: spawn
+        provider: spawn             # subagent 服务实现，默认就是 spawn
         agentProvider: bailian      # 你 DSH 配置里的任意 provider
         agentModel: deepseek-v4.1-flash
 ```
 
-子智能体的模型同样来自你的 DSH 配置（provider、密钥、上下文窗口），GUI 里直接列出已注册的那些，
-插件里不复制任何一份。
+子智能体的模型同样来自你的 DSH 配置（provider、密钥、上下文窗口），GUI 里用**一个合并的模型选择器**
+按 provider 分组列出已注册的那些，选中即同时写入 `agentProvider` 与 `agentModel`；插件里不复制任何一份。
+
+`provider` 是 **subagent 服务实现**（默认 `spawn`），不是模型 provider——GUI 默认把它藏起来，
+只有配成非 `spawn` 的值时才显示。
+
+要指定 persona 或工具集，给该评审者加 `agentPreset: <preset-id>`：这些组合归 Agent Preset 管。
+`spawn` 支持独立 preset；`fork` 会继承父会话的组合。
 
 ## 评审模式
 

@@ -7,8 +7,9 @@
  *   `ctx.subprocess` 直接起，不走 bash 工具，所以不受 DSH 文件沙箱与命令审批影响
  *   （codex 需要读写 `~/.codex`，在沙箱下会直接 `Operation not permitted`，走审批
  *   又会让每次评审都卡一次）。
- * - `subagent`：`ctx.subagents` 起一个子智能体，可以自己翻仓库、跑只读命令；模型来自
- *   DSH 自己的 provider 配置。默认剔除 `review` 工具，避免「评审者再起评审者」。
+ * - `subagent`：`ctx.subagents` 起一个子智能体，可以自己翻仓库；模型来自 DSH 自己的
+ *   provider 配置。递归由宿主的委派深度预算兜底（默认 1），persona 与工具集由 Agent
+ *   Preset 组合（`agentPreset`）。
  *
  * 刻意**没有**「把 diff 丢给一个裸模型」这一类：能自己打开仓库的评审者更有价值。
  * 两者都收敛成同一份报告，由 `mode` 控制强度与提示词；`config` 决定暴露哪些评审者。
@@ -259,14 +260,29 @@ async function buildDoctorReport(ctx, settings, cwd) {
 		}
 		if (subagents === undefined || subagents === null) {
 			lines.push('- ❌ `ctx.subagents` 服务不可用（需要 `@deepseek-ai/dsh-subagent` 与一个 provider）');
+			lines.push(`- 模型：${reviewer.agentProvider ?? '(默认)'}${reviewer.agentModel === undefined ? '' : `/${reviewer.agentModel}`}（未做连通性测试）`);
+			continue;
+		}
+		// 只查 provider 注册不够：0.1.x 上 provider 也在，但服务没有 startActivation()，
+		// 真实评审会在启动那一步才炸——自检必须把接口形状也照出来。
+		const canStart = typeof subagents.startActivation === 'function';
+		if (canStart) {
+			lines.push('- 启动接口：✅ `startActivation()`');
 		} else {
-			let provider;
-			try {
-				provider = typeof subagents.getProvider === 'function' ? subagents.getProvider(reviewer.provider) : undefined;
-			} catch {
-				provider = undefined;
-			}
-			lines.push(`- provider \`${reviewer.provider}\`：${provider === undefined ? '❌ 没有注册' : '✅ 已注册'}`);
+			lines.push('- 启动接口：❌ 宿主没有 `ctx.subagents.startActivation()`（本插件 2.x 需要 DSH >= 0.2.1；0.1.x 的 `start()` 已不再支持）');
+		}
+		let provider;
+		try {
+			provider = typeof subagents.getProvider === 'function' ? subagents.getProvider(reviewer.provider) : undefined;
+		} catch {
+			provider = undefined;
+		}
+		lines.push(`- provider \`${reviewer.provider}\`：${provider === undefined ? '❌ 没有注册' : '✅ 已注册'}`);
+		if (provider !== undefined && reviewer.agentPreset !== undefined && provider.capabilities?.agentPreset !== true) {
+			lines.push(`- agent preset \`${reviewer.agentPreset}\`：❌ provider \`${reviewer.provider}\` 不支持独立 preset（spawn 支持；fork 会继承父会话）`);
+		}
+		if (provider !== undefined && (reviewer.agentProvider !== undefined || reviewer.agentModel !== undefined) && provider.capabilities?.agentOptions === false) {
+			lines.push(`- 模型覆盖：❌ provider \`${reviewer.provider}\` 不支持 agentOptions，agentProvider/agentModel 会被拒绝`);
 		}
 		lines.push(`- 模型：${reviewer.agentProvider ?? '(默认)'}${reviewer.agentModel === undefined ? '' : `/${reviewer.agentModel}`}（未做连通性测试）`);
 	}

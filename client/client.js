@@ -86,14 +86,20 @@ window.__ModuleLoader__.load({
 			reviewerExecutable: '可执行文件',
 			catalogLoading: '正在读取可用模型…',
 			catalogFailed: '模型目录读取失败，可以自己填 provider 与模型名。',
+			catalogRetry: '重新读取',
+			modelCatalogEmpty: 'DSH 里还没有可用的模型 provider。可以直接填写 provider 与模型名。',
 			providerMissing: '（未选 provider）',
 			modelMissing: '（未选模型）',
 			reviewerModel: '模型',
 			reviewerProvider: 'provider',
 			reviewerLabel: '显示名（可选）',
 			reviewerEnabled: '启用',
-			reviewerAgentProvider: '子智能体的 provider',
+			reviewerServiceProvider: '子智能体服务',
+			reviewerServiceProviderHint: '默认 spawn，只有换了 subagent 服务实现时才需要改（一般不用动）。',
 			reviewerAgentModel: '子智能体的模型',
+			reviewerModelHint: '来自 DSH 当前可用的 provider 与模型；选中后两个字段一起更新。',
+			chooseModel: '选择模型',
+			modelNotInCatalog: '当前配置（不在模型目录里）',
 			noReviewers: '还没有评审者。先添加一个，或用下面的原始 JSON 直接写。',
 			addMode: '添加模式',
 			modeName: '模式名（工具参数 mode 用它）',
@@ -182,14 +188,20 @@ window.__ModuleLoader__.load({
 			reviewerExecutable: 'Executable',
 			catalogLoading: 'Loading available models…',
 			catalogFailed: 'Could not read the model catalog; type the provider and model yourself.',
+			catalogRetry: 'Reload',
+			modelCatalogEmpty: 'No model provider is available in DSH yet. You can type a provider and model below.',
 			providerMissing: '(no provider selected)',
 			modelMissing: '(no model selected)',
 			reviewerModel: 'Model',
 			reviewerProvider: 'Provider',
 			reviewerLabel: 'Display name (optional)',
 			reviewerEnabled: 'Enabled',
-			reviewerAgentProvider: 'Subagent provider',
+			reviewerServiceProvider: 'Subagent service',
+			reviewerServiceProviderHint: 'Defaults to spawn; change it only when another subagent service is installed.',
 			reviewerAgentModel: 'Subagent model',
+			reviewerModelHint: 'Providers and models currently registered in DSH; picking one updates both fields.',
+			chooseModel: 'Choose a model',
+			modelNotInCatalog: 'Current setting (not in the model catalog)',
 			noReviewers: 'No reviewers yet. Add one, or write them in the raw JSON below.',
 			addMode: 'Add mode',
 			modeName: 'Name (referenced by the tool’s mode argument)',
@@ -302,18 +314,67 @@ window.__ModuleLoader__.load({
 				}));
 		}
 
-		/** 值 → 下拉选项；当前值不在列表里时补一条，绝不悄悄丢值。 */
-		function selectOptions(entries, current) {
-			const options = entries.map((entry) => ({ value: entry.value, label: entry.label }));
-			const value = String(current ?? '');
-			if (value.length > 0 && !options.some((option) => option.value === value)) options.push({ value, label: `${value}（不在列表里）` });
-			return options;
-		}
-
 		/** 一行评审者「指向什么」的完整描述（tooltip 用，可能很长）。 */
 		function reviewerTargetFull(row) {
-			if ((row.kind ?? 'cli') === 'subagent') return `${row.provider ?? 'spawn'}${typeof row.agentModel === 'string' && row.agentModel.length > 0 ? ` · ${row.agentModel}` : ''}`;
+			if ((row.kind ?? 'cli') === 'subagent') {
+				// 真正决定跑什么的是 agentProvider/agentModel；`provider` 只是 subagent 服务实现
+				// （默认 spawn），把它放进摘要只会让人以为模型来自 spawn。
+				const provider = typeof row.agentProvider === 'string' ? row.agentProvider.trim() : '';
+				const model = typeof row.agentModel === 'string' ? row.agentModel.trim() : '';
+				return [provider, model].filter((part) => part.length > 0).join('/');
+			}
 			return row.executable ?? row.preset ?? 'cli';
+		}
+
+		/**
+		 * 目录 → 扁平的「provider + 模型」路由。
+		 *
+		 * 合并选择器要同时展示 provider 分组与模型名，所以先摊平成一条条路由；
+		 * 选中时再把 `provider` / `model` 一次写回两个字段。
+		 */
+		function modelRoutes(groups) {
+			const routes = [];
+			for (const group of Array.isArray(groups) ? groups : []) {
+				for (const model of Array.isArray(group.models) ? group.models : []) {
+					routes.push({
+						provider: group.id,
+						providerName: group.name,
+						model: model.id,
+						modelName: typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id,
+					});
+				}
+			}
+			return routes;
+		}
+
+		/** 找到某个 provider/model 在目录里的那一条；找不到返回 undefined。 */
+		function findModelRoute(groups, provider, model) {
+			const wantedProvider = typeof provider === 'string' ? provider : '';
+			const wantedModel = typeof model === 'string' ? model : '';
+			return modelRoutes(groups).find((route) => route.provider === wantedProvider && route.model === wantedModel);
+		}
+
+		/**
+		 * 当前行在合并选择器里该显示什么。
+		 *
+		 * 目录里找不到（provider 还没注册、模型已下线、或老配置手写的名字）时也要保留当前值，
+		 * 绝不能显示成「未选」——那会让人以为配置丢了。
+		 */
+		function currentModelRoute(groups, provider, model) {
+			const wantedProvider = typeof provider === 'string' ? provider.trim() : '';
+			const wantedModel = typeof model === 'string' ? model.trim() : '';
+			if (wantedProvider.length === 0 && wantedModel.length === 0) return undefined;
+			const found = findModelRoute(groups, wantedProvider, wantedModel);
+			if (found !== undefined) return found;
+			// provider 本身还在目录里时沿用它的展示名；只有 provider 也不认识才退回 id。
+			const group = Array.isArray(groups) ? groups.find((entry) => entry.id === wantedProvider) : undefined;
+			return {
+				provider: wantedProvider,
+				providerName: group?.name ?? wantedProvider,
+				model: wantedModel,
+				modelName: wantedModel,
+				missing: true,
+			};
 		}
 
 		/**
@@ -583,7 +644,7 @@ window.__ModuleLoader__.load({
 						variant: 'outline',
 						size: 'sm',
 						disabled: props.disabled,
-						'aria-haspopup': 'listbox',
+						'aria-haspopup': 'menu',
 						'aria-expanded': open,
 						onClick: () => setOpen(!open),
 					},
@@ -636,6 +697,142 @@ window.__ModuleLoader__.load({
 
 		/* ────────────────────────── 评审者 / 模式编辑器 ────────────────────────── */
 
+		/**
+		 * 模型选择器：把「子智能体的 provider」和「模型」合成一个入口。
+		 *
+		 * 交互对齐 DSH 自己的模型选择：按 provider 分组列出模型，选中一项就同时写回
+		 * `agentProvider` 与 `agentModel`，不用先选 provider 再等模型列表刷新。
+		 *
+		 * 目录不可用（或一个 provider 都没注册）时退回两个输入框——这条路是给
+		 * 「目录读取失败 / 老配置手写模型名」留的，不能让人卡在空下拉里。
+		 */
+		function ModelPicker(props) {
+			const [open, setOpen] = useState(false);
+			const { t, groups, status, disabled } = props;
+			const route = currentModelRoute(groups, props.provider, props.model);
+
+			const manual = (hintKey) =>
+				h(
+					'div',
+					{ className: 'dsh-review-model-fallback' },
+					h(
+						'div',
+						{ className: 'dsh-review-model-fallback-row' },
+						h(P.Input, {
+							value: props.provider ?? '',
+							placeholder: t('reviewerProvider'),
+							disabled,
+							onChange: (event) => props.onChange({ agentProvider: event.target.value }),
+						}),
+						h(P.Input, {
+							value: props.model ?? '',
+							placeholder: t('reviewerModel'),
+							disabled,
+							onChange: (event) => props.onChange({ agentModel: event.target.value }),
+						}),
+					),
+					h('p', { className: 'dsh-review-hint' }, t(hintKey)),
+					status === 'error' && typeof props.onRetry === 'function'
+						? h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: props.onRetry }, t('catalogRetry'))
+						: null,
+				);
+
+			// 只有真的挂着模型的分组才值得展开；全是空 provider 时直接给手填入口。
+			const usableGroups = groups.filter((group) => Array.isArray(group.models) && group.models.length > 0);
+			if (usableGroups.length === 0) {
+				return manual(status === 'loading' || status === 'idle' ? 'catalogLoading' : status === 'error' ? 'catalogFailed' : 'modelCatalogEmpty');
+			}
+
+			const selectedProvider = route?.provider ?? '';
+			const selectedModel = route?.model ?? '';
+			const option = (choice, extra = {}) => {
+				const selected = choice.provider === selectedProvider && choice.model === selectedModel;
+				return h(
+					'button',
+					{
+						key: `${choice.provider}/${choice.model}`,
+						type: 'button',
+						role: 'menuitemradio',
+						'aria-checked': selected ? 'true' : 'false',
+						className: `dsh-review-model-option${selected ? ' is-selected' : ''}`,
+						title: `${choice.providerName || choice.provider} / ${choice.modelName || choice.model}`,
+						disabled: choice.disabled === true,
+						...extra,
+						onClick: () => {
+							if (choice.disabled === true) return;
+							props.onChange({ agentProvider: choice.provider, agentModel: choice.model });
+							setOpen(false);
+						},
+					},
+					h(
+						'span',
+						{ className: 'dsh-review-model-option-copy' },
+						h('span', { className: 'dsh-review-model-option-name' }, choice.modelName || choice.model || t('modelMissing')),
+						choice.modelName !== choice.model ? h('span', { className: 'dsh-review-model-option-id' }, choice.model) : null,
+					),
+					h('span', { className: 'dsh-review-model-check', 'aria-hidden': 'true' }, selected ? '✓' : ''),
+				);
+			};
+
+			const currentLabel = route === undefined ? t('chooseModel') : route.modelName || t('modelMissing');
+			const currentProvider = route === undefined ? '' : route.providerName || route.provider || t('providerMissing');
+			return h(P.Menu, {
+				open,
+				anchor: h(
+					P.Button,
+					{
+						id: props.id,
+						variant: 'outline',
+						size: 'sm',
+						disabled,
+						'aria-haspopup': 'menu',
+						'aria-expanded': open,
+						title: route === undefined ? t('chooseModel') : `${currentProvider} / ${route.model || t('modelMissing')}`,
+						onClick: () => setOpen(!open),
+					},
+					h(
+						'span',
+						{ className: 'dsh-review-model-trigger' },
+						h('span', { className: 'dsh-review-model-trigger-name' }, currentLabel),
+						currentProvider.length > 0 ? h('span', { className: 'dsh-review-model-trigger-provider' }, currentProvider) : null,
+					),
+				),
+				listClassName: 'dsh-review-model-menu',
+				children: [
+					status === 'loading' ? h('p', { key: 'loading', className: 'dsh-review-model-status' }, t('catalogLoading')) : null,
+					status === 'error'
+						? h(
+								'div',
+								{ key: 'error', className: 'dsh-review-model-status' },
+								h('span', null, t('catalogFailed')),
+								typeof props.onRetry === 'function' ? h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: props.onRetry }, t('catalogRetry')) : null,
+							)
+						: null,
+					route?.missing === true
+						? h(P.MenuGroup, { key: '__current', label: t('modelNotInCatalog') }, option({ ...route, disabled: true }))
+						: null,
+					...usableGroups.map((group) =>
+						h(
+							P.MenuGroup,
+							{ key: group.id, label: group.name },
+							group.models.map((model) =>
+								option({
+									provider: group.id,
+									providerName: group.name,
+									model: model.id,
+									modelName: typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id,
+								}),
+							),
+						),
+					),
+				],
+				onClose: () => setOpen(false),
+				portal: true,
+				side: 'bottom',
+				align: 'start',
+			});
+		}
+
 		/** 「标签 + 控件」外壳：行内字段共用，`wide` 让长内容（例如可执行文件路径）占满整行。 */
 		function labelled(key, label, control, wide = false) {
 			return h('div', { key, className: `dsh-review-field${wide ? ' dsh-review-field--wide' : ''}` }, h('span', { className: 'dsh-review-label' }, label), control);
@@ -643,30 +840,55 @@ window.__ModuleLoader__.load({
 
 		/** 一行评审者：kind 决定后面显示哪些字段。 */
 		function ReviewerRow(props) {
-			const { t, row, index, providerOptions, modelsFor, disabled } = props;
+			const { t, row, index, groups, catalogStatus, onRetryCatalog, disabled } = props;
 			const kind = row.kind ?? 'cli';
 			const removedKind = !KINDS.includes(kind);
 			const update = (patch) => props.onChange({ ...row, ...patch });
 			const fields = [];
 			if (kind === 'subagent') {
+				// `provider` 是 subagent 服务实现（默认 spawn），不是模型 provider。
+				// 绝大多数部署只有 spawn，把它摆在表单里只会和「模型 provider」混淆——
+				// 所以默认不渲染，只有配置里真的写了别的值时才显示出来（改得动、看得见）。
+				const serviceProvider = typeof row.provider === 'string' ? row.provider.trim() : '';
+				if (serviceProvider.length > 0 && serviceProvider !== 'spawn') {
+					fields.push(
+						labelled(
+							'provider',
+							t('reviewerServiceProvider'),
+							h(
+								'div',
+								{ className: 'dsh-review-model-field' },
+								h(P.Input, { value: row.provider ?? '', placeholder: 'spawn', disabled, onChange: (event) => update({ provider: event.target.value }) }),
+								h('p', { className: 'dsh-review-hint' }, t('reviewerServiceProviderHint')),
+							),
+							true,
+						),
+					);
+				}
 				fields.push(
-					labelled('provider', t('reviewerProvider'), h(P.Input, { value: row.provider ?? '', placeholder: 'spawn', disabled, onChange: (event) => update({ provider: event.target.value }) })),
-					labelled('agentProvider', t('reviewerAgentProvider'), h(Dropdown, {
-						id: `reviewer-${index}-agent-provider`,
-						value: row.agentProvider ?? '',
-						options: selectOptions(providerOptions, row.agentProvider),
-						placeholder: t('providerMissing'),
-						disabled,
-						onChange: (value) => update({ agentProvider: value }),
-					})),
-					labelled('agentModel', t('reviewerAgentModel'), h(Dropdown, {
-						id: `reviewer-${index}-agent-model`,
-						value: row.agentModel ?? '',
-						options: selectOptions(modelsFor(row.agentProvider), row.agentModel),
-						placeholder: t('modelMissing'),
-						disabled,
-						onChange: (value) => update({ agentModel: value }),
-					})),
+					labelled(
+						'agentModel',
+						t('reviewerAgentModel'),
+						h(
+							'div',
+							{ className: 'dsh-review-model-field' },
+							h(ModelPicker, {
+								id: `reviewer-${index}-agent-model`,
+								t,
+								groups,
+								status: catalogStatus,
+								provider: row.agentProvider,
+								model: row.agentModel,
+								disabled,
+								onRetry: onRetryCatalog,
+								onChange: (patch) => update(patch),
+							}),
+							groups.length > 0 && (typeof row.agentModel !== 'string' || row.agentModel.length === 0)
+								? h('p', { className: 'dsh-review-hint' }, t('reviewerModelHint'))
+								: null,
+						),
+						true,
+					),
 				);
 			} else {
 				fields.push(
@@ -688,6 +910,7 @@ window.__ModuleLoader__.load({
 				h(
 					'div',
 					{ className: 'dsh-review-card-head' },
+					h('label', { className: 'dsh-review-card-head-label', htmlFor: `reviewer-${index}-id` }, 'id'),
 					h(P.Input, { id: `reviewer-${index}-id`, value: row.id ?? '', placeholder: t('reviewerId'), disabled, onChange: (event) => update({ id: event.target.value }) }),
 					h(P.Switch, { checked: row.enabled !== false, label: t('reviewerEnabled'), disabled, onChange: (next) => update({ enabled: next }) }),
 					h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: () => props.onRemove() }, t('remove')),
@@ -734,8 +957,9 @@ window.__ModuleLoader__.load({
 						t: props.t,
 						row,
 						index,
-						providerOptions: props.providerOptions,
-						modelsFor: props.modelsFor,
+						groups: props.groups,
+						catalogStatus: props.catalogStatus,
+						onRetryCatalog: props.onRetryCatalog,
 						disabled: props.disabled,
 						onChange: (next) => props.onChange(rows.map((entry, position) => (position === index ? next : entry))),
 						onRemove: () => props.onChange(rows.filter((entry, position) => position !== index)),
@@ -983,8 +1207,6 @@ window.__ModuleLoader__.load({
 			void field.label; // 标题由外层分区/子分组给出
 			const text = state?.text ?? '';
 			const groups = catalogGroups(catalog);
-			const providerOptions = groups.map((group) => ({ value: group.id, label: group.name }));
-			const modelsFor = (provider) => (groups.find((group) => group.id === provider)?.models ?? []).map((model) => ({ value: model.id, label: model.name ?? model.id }));
 			const rows = isReviewers ? reviewerRows(text) : modeRows(text);
 			const onChange = (next) => actions.edit(field.path, isReviewers ? serializeReviewers(next) : serializeModes(next));
 			const reviewerIds = reviewerRows(reviewersText)
@@ -1005,7 +1227,7 @@ window.__ModuleLoader__.load({
 					'div',
 					{ className: 'dsh-review-structured-body' },
 					isReviewers
-						? h(ReviewersEditor, { t, rows, groups, providerOptions, modelsFor, disabled, onChange })
+						? h(ReviewersEditor, { t, rows, groups, catalogStatus: catalog?.status, onRetryCatalog: props.onRetryCatalog, disabled, onChange })
 						: h(ModesEditor, { t, rows, reviewerOptions: reviewerIds, disabled, onChange }),
 				),
 				showJson
@@ -1223,6 +1445,121 @@ h5.dsh-review-subgroup-title {
   gap: 8px 18px;
 }
 
+/* 合并后的模型选择器：触发器里「模型名 + provider 名」，菜单里按 provider 分组 */
+.dsh-review-model-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.dsh-review-model-trigger {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.dsh-review-model-trigger-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-review-model-trigger-provider {
+  flex: none;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-review-model-menu { min-width: 240px; }
+.dsh-review-model-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+.dsh-review-model-option:hover:not(:disabled),
+.dsh-review-model-option:focus-visible {
+  background: var(--dsw-alias-bg-layer-4);
+  outline: none;
+}
+.dsh-review-model-option.is-selected { background: var(--dsw-alias-bg-layer-3); }
+.dsh-review-model-option:disabled { cursor: default; opacity: 0.75; }
+.dsh-review-model-option-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.dsh-review-model-option-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-review-model-option-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-review-model-check {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--dsw-alias-state-business-primary, #4d6bfe);
+}
+.dsh-review-model-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-review-model-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+.dsh-review-model-fallback-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+.dsh-review-model-fallback-row > input { flex: 1 1 140px; min-width: 0; }
+.dsh-review-catalog-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dsh-review-catalog-status > .dsh-review-hint { flex: 1; }
+
 /* 结构化编辑器：一行一块卡片 */
 .dsh-review-editor { display: flex; flex-direction: column; }
 .dsh-review-editor > button { align-self: flex-start; margin-top: 12px; }
@@ -1242,6 +1579,12 @@ h5.dsh-review-subgroup-title {
   gap: 8px;
 }
 .dsh-review-card-head > input { flex: 1 1 180px; min-width: 0; }
+.dsh-review-card-head-label {
+  flex: none;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
 .dsh-review-card-kind {
   display: flex;
   align-items: center;
@@ -1390,7 +1733,7 @@ h5.dsh-review-subgroup-title {
 										h(
 											'span',
 											{ className: 'dsh-review-active-meta', title: row.title },
-											row.kind === 'unknown' ? t('activeUnknownMeta') : `${row.kind} · ${row.target}`,
+											row.kind === 'unknown' ? t('activeUnknownMeta') : [row.kind, row.target].filter((part) => typeof part === 'string' && part.length > 0).join(' · '),
 										),
 									),
 								),
@@ -1416,7 +1759,7 @@ h5.dsh-review-subgroup-title {
 			const modesText = view.fields.modes?.text ?? '';
 			const renderField = (field) =>
 				field.control === 'reviewers' || field.control === 'modes'
-					? h(StructuredEditor, { key: field.path, t, field, state: view.fields[field.path], actions, disabled, catalog, reviewersText })
+					? h(StructuredEditor, { key: field.path, t, field, state: view.fields[field.path], actions, disabled, catalog, reviewersText, onRetryCatalog: props.reloadCatalog })
 					: h(Field, {
 							key: field.path,
 							t,
@@ -1435,7 +1778,16 @@ h5.dsh-review-subgroup-title {
 				// 不必滚到最底下才发现有个保存按钮。
 				h(AutoSaveStatus, { key: 'autosave', t, status: autosave?.status }),
 				catalog?.status === 'loading' ? h('p', { className: 'dsh-review-hint' }, t('catalogLoading')) : null,
-				catalog?.status === 'error' ? h('p', { className: 'dsh-review-hint' }, t('catalogFailed')) : null,
+				catalog?.status === 'error'
+					? h(
+							'div',
+							{ className: 'dsh-review-catalog-status' },
+							h('p', { className: 'dsh-review-hint' }, t('catalogFailed')),
+							typeof props.reloadCatalog === 'function'
+								? h(P.Button, { variant: 'ghost', size: 'sm', disabled, onClick: props.reloadCatalog }, t('catalogRetry'))
+								: null,
+						)
+					: null,
 				// 1) 用户最关心的：启用哪些评审者（最上面）
 				h(
 					'section',
@@ -1699,7 +2051,10 @@ h5.dsh-review-subgroup-title {
 			};
 
 			// 宿主模型目录（provider / model 下拉的数据源）：可选能力，拿不到就退回手填。
-			const catalog = { status: 'idle', groups: [], failures: [] };
+			//
+			// 每次变化都换成新对象：宿主用 useSyncExternalStore 消费这个快照，原地改字段
+			// 会让 Object.is 认为「没变」，目录晚到时页面不重渲染（看起来就是下拉一直空的）。
+			let catalog = { status: 'idle', groups: [], failures: [] };
 			const listeners = new Set();
 			const catalogStore = {
 				getSnapshot: () => catalog,
@@ -1718,45 +2073,82 @@ h5.dsh-review-subgroup-title {
 				}
 			};
 			// `remote.session` 是命名空间服务：有的组合能直接 get 到，有的要从 `remote` 上取。
-			const pickRemote = () => {
+			// 每次都重新取：插件 apply 时服务可能还没注册，不能把 undefined 缓存下来。
+			const pickRemote = (scope) => {
 				try {
-					const service = ctx.get?.('remote');
+					const service = scope?.get?.('remote');
 					if (service?.session?.modelCatalog !== undefined) return service.session;
 				} catch {
 					/* 换下一条路 */
 				}
 				try {
-					return ctx.get?.('remote.session');
+					return scope?.get?.('remote.session');
 				} catch {
 					return undefined;
 				}
 			};
-			const remote = pickRemote();
 			let loading = false;
-			const loadCatalog = async () => {
-				if (loading || typeof remote?.modelCatalog !== 'function') return;
+			const loadCatalog = async (scope) => {
+				const remote = pickRemote(scope === undefined ? ctx : scope);
+				if (loading) return false;
+				// 服务还没就绪：保持 idle，等 `remote.session` 注册后由 inject / 事件再试。
+				if (typeof remote?.modelCatalog !== 'function') return false;
 				loading = true;
-				catalog.status = 'loading';
+				catalog = { ...catalog, status: 'loading' };
 				notify();
 				try {
 					const response = await remote.modelCatalog();
 					if (response?.ok === true) {
-						catalog.groups = Array.isArray(response.value?.groups) ? response.value.groups : [];
-						catalog.failures = Array.isArray(response.value?.failures) ? response.value.failures : [];
-						catalog.status = 'ready';
+						catalog = {
+							status: 'ready',
+							groups: Array.isArray(response.value?.groups) ? response.value.groups : [],
+							failures: Array.isArray(response.value?.failures) ? response.value.failures : [],
+						};
 					} else {
-						catalog.status = 'error';
+						catalog = { ...catalog, status: 'error' };
 					}
 				} catch {
-					catalog.status = 'error';
+					catalog = { ...catalog, status: 'error' };
 				}
 				loading = false;
 				notify();
+				return catalog.status === 'ready';
 			};
-			ctx.effect(() => {
-				loadCatalog();
-				return () => {};
-			}, 'dsh-review: model catalog');
+			/**
+			 * 首次加载的时机。
+			 *
+			 * 这里不能用「apply 时取一次 remote」的写法：刚装好插件、页面第一次打开时，
+			 * `remote.session` 往往还没注册，那一刻取到 undefined 就再也不会重试，模型下拉
+			 * 会一直是空的（关掉插件再开才恢复）。正确做法是声明依赖，让宿主在服务就绪时
+			 * 回调；服务注册事件再兜一层，覆盖“底座在、子服务晚到”的部署。
+			 */
+			let injected = false;
+			if (typeof ctx.inject === 'function') {
+				try {
+					ctx.inject(['remote.session'], (scope) => {
+						void loadCatalog(scope);
+					});
+					injected = true;
+				} catch {
+					/* 宿主不支持动态依赖时退回一次性加载 */
+				}
+			}
+			if (!injected) {
+				// 老宿主 / 测试桩没有动态 inject：至少按当前上下文试一次。
+				ctx.effect(() => {
+					void loadCatalog();
+					return () => {};
+				}, 'dsh-review: model catalog');
+			}
+			if (typeof ctx.on === 'function') {
+				try {
+					ctx.on('internal/service', (name) => {
+						if (name === 'remote' || name === 'remote.session') void loadCatalog();
+					});
+				} catch {
+					/* 事件通道不可用就靠 inject 的回调 */
+				}
+			}
 			for (const event of ['llm/adapters-updated', 'settings/document-updated']) {
 				try {
 					const bus = ctx.get?.('remote') ?? ctx.remote;
@@ -1772,7 +2164,12 @@ h5.dsh-review-subgroup-title {
 						name,
 						key,
 						locale: NS,
-						inject: () => ({ hooks: { reviewConfigForm: store, reviewCatalog: catalogStore, reviewAutosave: autoStore }, catalog, ...actions }),
+						inject: () => ({
+							hooks: { reviewConfigForm: store, reviewCatalog: catalogStore, reviewAutosave: autoStore },
+							catalog,
+							reloadCatalog: () => void loadCatalog(),
+							...actions,
+						}),
 					},
 					ReviewConfigPage,
 				);
@@ -1814,7 +2211,9 @@ h5.dsh-review-subgroup-title {
 			reviewerChoices,
 			toggleSelection,
 			catalogGroups,
-			selectOptions,
+			modelRoutes,
+			findModelRoute,
+			currentModelRoute,
 			newReviewerRow,
 			presetExecutable,
 			FIELDS,

@@ -40,6 +40,9 @@ Or ask your agent to run `plugin_manager` → `install_bundle` with that absolut
 
 Restart the host afterwards. Updating works the same way: `git pull`, then restart.
 
+Requires **DSH 0.2.1 or newer**. The plugin declares this as `engines.dsh` in its manifest, so an
+older host refuses to install or activate it instead of failing later inside a review.
+
 ## Use
 
 ```js
@@ -63,7 +66,7 @@ rather than quietly running everything.
 | Kind | What runs | Reads the code itself | Needs |
 | --- | --- | --- | --- |
 | `cli` | a coding agent you already trust | depends on the preset (codex reads the repo) | that CLI installed |
-| `subagent` | a DSH child agent | yes, it has tools | a subagent provider |
+| `subagent` | a DSH child agent | yes, it has tools | a subagent service (default `spawn`) |
 
 CLI presets: `codex`, `claude`, `gemini`, `opencode`, `cursor`, or `custom` with your own
 command template.
@@ -87,18 +90,23 @@ review({ doctor: true })
 ```
 
 It checks, per reviewer, whether the executable resolves, which candidate found it, whether
-`--version` runs, and whether the subagent provider is registered. It reviews nothing, starts no
-reviewer, and does not need a git repository. Model connectivity for subagents is out of scope —
-that would need a real request.
+`--version` runs, whether the subagent provider is registered, and whether the host exposes the
+`startActivation()` interface this plugin uses. It reviews nothing, starts no reviewer, and does
+not need a git repository. Model connectivity for subagents is out of scope — that would need a
+real request.
 
 One thing worth knowing: a `subagent` inherits the parent session's model unless you set
 `agentModel`, so it is **not** automatically a second opinion — name the model explicitly if you
 want one.
 
-Subagents get two safety nets by default: the `review` tool itself is filtered out (so a reviewer
-cannot start more reviews) and a 30-minute wall-clock ceiling applies (`timeoutMs` per reviewer;
-`hardTimeoutMs` still caps the whole call). Progress is reported while they run, so a long review
-does not look stuck.
+Subagents get a 30-minute wall-clock ceiling by default (`timeoutMs` per reviewer; `hardTimeoutMs`
+still caps the whole call). Recursion is bounded by the host's delegation-depth budget (default 1),
+so a reviewer normally cannot start another subagent. Progress is reported while they run, so a
+long review does not look stuck.
+
+DSH 0.2.1 moved persona and tool restrictions out of the subagent start request: configure them in
+an **Agent Preset** and select it with `agentPreset`. The old `persona` / `toolFilter` keys are
+ignored with a migration warning instead of silently doing nothing.
 
 There is deliberately no "send the diff to a bare model" kind: a reviewer that can open the
 repository itself is worth more than one that only sees what it was handed.
@@ -114,13 +122,21 @@ repository itself is worth more than one that only sees what it was handed.
     reviewers:
       - id: deep-dive
         kind: subagent
-        provider: spawn
+        provider: spawn             # subagent service, `spawn` by default
         agentProvider: bailian      # any provider from your DSH config
         agentModel: deepseek-v4.1-flash
 ```
 
 A subagent's model comes from your DSH configuration (provider, key, context window), and the
-GUI offers the registered ones as a list — nothing is duplicated in this plugin.
+GUI combines provider and model into one grouped picker — choosing an entry writes both
+`agentProvider` and `agentModel`, and nothing is duplicated in this plugin.
+
+`provider` is the **subagent service implementation** (default `spawn`), not the model provider.
+The GUI hides it unless it is set to something other than `spawn`.
+
+Add `agentPreset: <preset-id>` to run that reviewer under a specific Agent Preset. The preset owns
+its persona and tool set; `spawn` supports an independent preset, while `fork` inherits the
+parent's composition.
 
 ## Review modes
 

@@ -280,10 +280,18 @@ console.log('\nA. 配置归一化');
 	// 实测评审者要 2～20 分钟，任何「先等一小段」都是白等，所以默认立即交回 job id。
 	check('A 前台等待默认 0（立即交回）', resolveSettings({}).waitMs === 0, String(resolveSettings({}).waitMs));
 	check('A 子智能体默认有时间上限兜底', resolveSettings({ reviewers: [{ id: 's', kind: 'subagent' }] }).reviewers[0].timeoutMs === 1800000, String(resolveSettings({ reviewers: [{ id: 's', kind: 'subagent' }] }).reviewers[0].timeoutMs));
-	// 默认剔除 review 自己：否则「只读评审者」手里握着 review + 无预算 = 递归与成本炸弹。
-	check('A 子智能体默认不给 review 工具', JSON.stringify(resolveSettings({ reviewers: [{ id: 's', kind: 'subagent' }] }).reviewers[0].toolFilter) === JSON.stringify({ deny: ['review'] }));
-	check('A 显式 toolFilter 覆盖默认', JSON.stringify(resolveSettings({ reviewers: [{ id: 's', kind: 'subagent', toolFilter: { allow: ['read'] } }] }).reviewers[0].toolFilter) === JSON.stringify({ allow: ['read'] }));
-	check('A CLI 评审者不设 toolFilter', resolveSettings({ agents: [{ preset: 'codex' }] }).reviewers[0].toolFilter === undefined);
+	// 0.2.1 起 persona / toolFilter 只能由 Agent Preset 组合：不再出现在归一化结果里，
+	// 但旧配置必须点名告警（静默失效正是这次 2.0 要避免的）。
+	{
+		const plain = resolveSettings({ reviewers: [{ id: 's', kind: 'subagent' }] }).reviewers[0];
+		check('A 子智能体不再往启动请求塞 toolFilter', plain.toolFilter === undefined);
+		check('A 默认不选 agentPreset', plain.agentPreset === undefined);
+		const withPreset = resolveSettings({ reviewers: [{ id: 's', kind: 'subagent', agentPreset: 'review-readonly' }] }).reviewers[0];
+		check('A agentPreset 原样保留', withPreset.agentPreset === 'review-readonly', String(withPreset.agentPreset));
+		const legacyFields = resolveSettings({ reviewers: [{ id: 's', kind: 'subagent', persona: '你是评审者', toolFilter: { deny: ['review'] } }] });
+		check('A 旧 persona 有迁移告警', legacyFields.warnings.some((w) => w.includes('persona 已移除')), legacyFields.warnings.join('|'));
+		check('A 旧 toolFilter 有迁移告警', legacyFields.warnings.some((w) => w.includes('toolFilter 已移除')), legacyFields.warnings.join('|'));
+	}
 	// 一个都不选 = 不启用：unset 与 [] 都不是「全部启用」。
 	check('A 未勾选时默认集合为空', resolveSettings({ agents: [{ preset: 'codex' }] }).defaultReviewers.length === 0);
 	{
@@ -476,11 +484,12 @@ console.log('\nE. 子智能体评审者');
 	const subagentCalls = [];
 	const services = {
 		subagents: {
-			getProvider: (name) => (name === 'spawn' ? { name: 'spawn' } : undefined),
+			getProvider: (name) => (name === 'spawn' ? { name: 'spawn', capabilities: { agentOptions: true, agentPreset: true } } : undefined),
 			resolveMaxDepth: (depth) => depth,
-			async start(name, request) {
-				subagentCalls.push({ name, request });
+			async startActivation(spec) {
+				subagentCalls.push(spec);
 				return {
+					childId: 'child-1',
 					result: Promise.resolve({ output: [{ type: 'text', text: '子智能体结论：没发现问题。' }], stopReason: 'completed' }),
 					dispose: async () => {},
 				};
@@ -488,14 +497,58 @@ console.log('\nE. 子智能体评审者');
 		},
 	};
 	const h = await loadPlugin({
-		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', agentProvider: 'bailian', agentModel: 'deepseek-v4.1-flash', maxDepth: 1, persona: '你是评审者' }] },
+		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', agentProvider: 'bailian', agentModel: 'deepseek-v4.1-flash', maxDepth: 1, agentPreset: 'review-readonly' }] },
 		harness: { ...GIT, services },
 	});
 	const value = await run(h, {});
 	check('E 子智能体结论进报告', value.report.includes('子智能体结论'), value.report.slice(0, 300));
+	check('E 用 startActivation 的 spec 形状', subagentCalls[0].provider === 'spawn' && subagentCalls[0].label === 'review:deep' && subagentCalls[0].delivery === 'caller' && subagentCalls[0].signal instanceof AbortSignal, JSON.stringify({ provider: subagentCalls[0].provider, label: subagentCalls[0].label, delivery: subagentCalls[0].delivery }));
+	check('E label/signal 不再塞进 request', !('label' in subagentCalls[0].request) && !('signal' in subagentCalls[0].request));
 	check('E 传了 provider 与 model', subagentCalls[0].request.agentOptions.provider === 'bailian' && subagentCalls[0].request.agentOptions.model === 'deepseek-v4.1-flash');
-	check('E 传了 parent 与 persona', subagentCalls[0].request.parent.id === 'agent-1' && subagentCalls[0].request.persona === '你是评审者');
+	check('E 传了 parent 与 agentPreset', subagentCalls[0].request.parent.id === 'agent-1' && subagentCalls[0].request.agentPreset === 'review-readonly');
 	check('E 提示词里有评审包', subagentCalls[0].request.prompt[0].text.includes('评审任务'));
+}
+{
+	// 0.1.x 只有 start()：要么明确报版本，要么让人看到 `start is not a function`。
+	const h = await loadPlugin({
+		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] },
+		harness: { ...GIT, services: { subagents: { getProvider: () => ({ name: 'spawn' }) } } },
+	});
+	const value = await run(h, {});
+	check('E 旧宿主缺少 startActivation 时明确报版本', value.report.includes('startActivation') && value.report.includes('0.2.1'), value.report.slice(0, 500));
+}
+{
+	// 0.2.1 的 signal 只管启动前取消：发布后必须 dispose 才能真正停掉子智能体。
+	let disposed = 0;
+	const services = {
+		subagents: {
+			getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true } }),
+			resolveMaxDepth: (depth) => depth,
+			async startActivation() {
+				let settle;
+				const result = new Promise((resolve) => {
+					settle = resolve;
+				});
+				return {
+					childId: 'child-hang',
+					result,
+					async dispose() {
+						disposed += 1;
+						settle({ output: [], stopReason: 'aborted' });
+					},
+				};
+			},
+		},
+	};
+	const keepAlive = setInterval(() => {}, 10);
+	try {
+		const h = await loadPlugin({ plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', timeoutMs: 20 }] }, harness: { ...GIT, services } });
+		const value = await run(h, {});
+		check('E 超时后 dispose 停掉子智能体', disposed === 1, `disposed=${disposed}`);
+		check('E 超时报告仍指向 timeoutMs', value.report.includes('被该评审者的 `timeoutMs` 中止'), value.report.slice(-600));
+	} finally {
+		clearInterval(keepAlive);
+	}
 }
 {
 	const h = await loadPlugin({ plugin: { reviewers: [{ id: 'deep', kind: 'subagent' }] }, harness: { ...GIT } });
@@ -758,11 +811,11 @@ console.log('\nG3. 范围 + 关注点');
 	const subagentCalls = [];
 	const subServices = {
 		subagents: {
-			getProvider: (name) => (name === 'spawn' ? { name: 'spawn' } : undefined),
+			getProvider: (name) => (name === 'spawn' ? { name: 'spawn', capabilities: { agentOptions: true, agentPreset: true } } : undefined),
 			resolveMaxDepth: (depth) => depth,
-			async start(name, request) {
-				subagentCalls.push({ name, request });
-				return { result: Promise.resolve({ output: [{ type: 'text', text: '子智能体结论' }], stopReason: 'completed' }), dispose: async () => {} };
+			async startActivation(spec) {
+				subagentCalls.push(spec);
+				return { childId: 'child-g3', result: Promise.resolve({ output: [{ type: 'text', text: '子智能体结论' }], stopReason: 'completed' }), dispose: async () => {} };
 			},
 		},
 	};
@@ -833,7 +886,7 @@ console.log('\nG5. 环境自检');
 		},
 		harness: {
 			...GIT,
-			services: { subagents: { getProvider: (name) => (name === 'spawn' ? { name } : undefined) } },
+			services: { subagents: { startActivation: async () => { throw new Error('doctor 不应启动子智能体'); }, getProvider: (name) => (name === 'spawn' ? { name, capabilities: { agentOptions: true, agentPreset: true } } : undefined) } },
 			resolveExecutable: async (command) => {
 				if (!command.includes('/')) throw new Error('not found in PATH');
 				if (!existsSync(command)) throw new Error('not an executable file');
@@ -845,7 +898,17 @@ console.log('\nG5. 环境自检');
 	check('G5 doctor 报出定位失败', value.report.includes('定位：❌') && value.report.includes('/nope/gone-bin'), value.report);
 	check('G5 doctor 给出处理办法', value.report.includes('直接依赖'), value.report);
 	check('G5 doctor 检查 subagent provider', value.report.includes('provider `spawn`：✅ 已注册'), value.report);
+	check('G5 doctor 检查 startActivation 接口', value.report.includes('启动接口：✅ `startActivation()`'), value.report);
 	check('G5 doctor 说明未做连通性测试', value.report.includes('未做连通性测试'), value.report);
+}
+{
+	// 旧宿主：provider 在、但服务没有 startActivation——自检必须当场报出来。
+	const h = await loadPlugin({
+		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] },
+		harness: { ...GIT, services: { subagents: { getProvider: () => ({ name: 'spawn' }) } } },
+	});
+	const value = await run(h, { doctor: true });
+	check('G5 doctor 报出缺少 startActivation', value.report.includes('启动接口：❌') && value.report.includes('0.2.1'), value.report);
 }
 {
 	// provider 没注册：明确 ❌，而不是让人以为配置没问题。
@@ -1116,17 +1179,17 @@ console.log('\nH. 回归');
 	// 「调高 timeoutMs」的错误建议）。现在只认结构化标志，且区分「评审者超时 / job 硬上限 / 取消」。
 	const hanging = {
 		subagents: {
-			getProvider: () => ({ name: 'spawn' }),
-			async start(name, request) {
+			getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true } }),
+			async startActivation(spec) {
 				// 报错文案刻意不含「超时 / aborted / 中止」——真实服务侧的措辞不由插件决定，
 				// 旧实现正是靠这些关键词猜超时，猜不中就静默。
 				const result = new Promise((_, reject) => {
-					const fail = () => reject(new Error(`子智能体已停止：${String(request.signal?.reason)}`));
+					const fail = () => reject(new Error(`子智能体已停止：${String(spec.signal?.reason)}`));
 					// 信号可能在我们订阅之前就已经 abort 了（取消发生在子智能体起来之前）。
-					if (request.signal?.aborted === true) fail();
-					else request.signal?.addEventListener('abort', fail, { once: true });
+					if (spec.signal?.aborted === true) fail();
+					else spec.signal?.addEventListener('abort', fail, { once: true });
 				});
-				return { result, dispose: async () => {} };
+				return { childId: 'child-hanging', result, dispose: async () => {} };
 			},
 		},
 	};
@@ -1157,14 +1220,14 @@ console.log('\nH. 回归');
 		// 后到的定时器不能改写「已经发生的取消」，否则照样给出错误的调高超时建议。
 		const slowCleanup = {
 			subagents: {
-				getProvider: () => ({ name: 'spawn' }),
-				async start(name, request) {
+				getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true } }),
+				async startActivation(spec) {
 					const result = new Promise((_, reject) => {
-						const fail = () => setTimeout(() => reject(new Error(`子智能体已停止：${String(request.signal?.reason)}`)), 60);
-						if (request.signal?.aborted === true) fail();
-						else request.signal?.addEventListener('abort', fail, { once: true });
+						const fail = () => setTimeout(() => reject(new Error(`子智能体已停止：${String(spec.signal?.reason)}`)), 60);
+						if (spec.signal?.aborted === true) fail();
+						else spec.signal?.addEventListener('abort', fail, { once: true });
 					});
-					return { result, dispose: async () => {} };
+					return { childId: 'child-slow', result, dispose: async () => {} };
 				},
 			},
 		};
@@ -1353,7 +1416,7 @@ console.log('\nJ. 浏览器半边');
  * 工厂只要 react 与 primitives 两个 external，所以替身足够跑通 apply、纯逻辑与渲染树。
  */
 async function loadClientBundle(options = {}) {
-	const captured = { registrations: [], slots: [], locales: [], effects: [], disposers: [], models: [], scope: undefined, entry: undefined, served: undefined };
+	const captured = { registrations: [], slots: [], locales: [], effects: [], disposers: [], models: [], injects: [], scope: undefined, entry: undefined, served: undefined };
 	const asArray = (value) => (value === undefined || value === null || value === false ? [] : Array.isArray(value) ? value.flat() : [value]);
 	// React 会把 children 同时放进 props.children；桩件也照做，组件内部才能读到 props.children。
 	const react = {
@@ -1450,7 +1513,8 @@ async function loadClientBundle(options = {}) {
 	// 这五个会渲染 children（表单容器、按钮、菜单锚点），其余是叶子控件。
 	primitives.SettingsForm = (props) => ({ type: 'SettingsForm', props, children: asArray(props.children) });
 	primitives.Button = (props) => ({ type: 'Button', props, children: asArray(props.children) });
-	primitives.Menu = (props) => ({ type: 'Menu', props, children: asArray(props.anchor) });
+	primitives.Menu = (props) => ({ type: 'Menu', props, children: [...asArray(props.anchor), ...asArray(props.children).filter((child) => child !== null && child !== undefined && child !== false)] });
+	primitives.MenuGroup = (props) => ({ type: 'MenuGroup', props, children: asArray(props.children) });
 	for (const name of ['SettingsValueField', 'Switch', 'Checkbox', 'SegmentedControl', 'Input']) primitives[name] = (props) => ({ type: name, props, children: [] });
 	primitives.settingsTextField = (field) => ({ field, format: (value) => (value === undefined || value === null ? '' : String(value)), parse: (text) => (String(text).trim() === '' ? { kind: 'clear' } : { kind: 'set', value: String(text) }) });
 	primitives.settingsNumberField = (field) => ({
@@ -1495,6 +1559,7 @@ async function loadClientBundle(options = {}) {
 			failures: [],
 		},
 	};
+	const remoteSession = { modelCatalog: async () => catalogResult };
 	const ctx = {
 		locale: { bind: () => (key) => key, register: (ns, dictionaries) => (captured.locales.push({ ns, dictionaries }), () => {}) },
 		configForms: {
@@ -1514,7 +1579,16 @@ async function loadClientBundle(options = {}) {
 			captured.disposers.push(dispose);
 			return dispose;
 		},
-		get: (service) => (service === 'remote.session' ? { modelCatalog: async () => catalogResult } : undefined),
+		// deferRemote 模拟「插件 apply 时 remote.session 还没注册」：先存下依赖声明，
+		// 等服务真的出现后由用例手动回调。
+		get: options.deferRemote === true ? () => undefined : (service) => (service === 'remote.session' ? remoteSession : undefined),
+		inject: (deps, callback) => {
+			captured.injects.push(deps);
+			const fire = (scope) => callback(scope);
+			if (options.deferRemote === true) captured.remoteInject = fire;
+			else fire({ get: (service) => (service === 'remote.session' ? remoteSession : undefined) });
+			return () => {};
+		},
 	};
 
 	let loaded;
@@ -1611,8 +1685,14 @@ function findAll(node, predicate) {
 	const groups = I.catalogGroups({ groups: [{ id: 'bailian', name: '百炼', models: [{ id: 'qwen3.8-max' }] }, { nonsense: true }, { id: 'x', models: [null, { id: 'ok' }] }] });
 	check('J catalogGroups 过滤坏形状', groups.length === 2 && groups[0].name === '百炼' && groups[1].models.length === 1, JSON.stringify(groups.map((g) => g.id)));
 	check('J catalogGroups 对空目录返回空', I.catalogGroups(undefined).length === 0 && I.catalogGroups({ groups: 'nope' }).length === 0);
-	const options = I.selectOptions([{ value: 'a', label: 'A' }], 'zzz');
-	check('J selectOptions 保留不在列表里的当前值', options.length === 2 && options[1].value === 'zzz', JSON.stringify(options));
+	// 合并选择器：目录摊平成 provider/model 路由，选中时一次写回两个字段。
+	const routes = I.modelRoutes(groups);
+	check('J modelRoutes 摊平 provider 与模型', routes.length === 2 && routes[0].provider === 'bailian' && routes[0].modelName === 'qwen3.8-max' && routes[1].provider === 'x', JSON.stringify(routes.map((route) => `${route.provider}/${route.model}`)));
+	check('J findModelRoute 精确匹配', I.findModelRoute(groups, 'bailian', 'qwen3.8-max')?.providerName === '百炼' && I.findModelRoute(groups, 'bailian', 'nope') === undefined);
+	const kept = I.currentModelRoute(groups, 'gone', 'old-model');
+	check('J 目录外的当前值不丢', kept?.missing === true && kept.provider === 'gone' && kept.model === 'old-model', JSON.stringify(kept));
+	check('J 未配置模型时不伪造当前值', I.currentModelRoute(groups, undefined, '') === undefined);
+	check('J 目录里的当前值带展示名', I.currentModelRoute(groups, 'bailian', 'qwen3.8-max')?.modelName === 'qwen3.8-max');
 	check('J presetExecutable 把 cursor 映射到 cursor-agent', I.presetExecutable('cursor') === 'cursor-agent' && I.presetExecutable('codex') === 'codex');
 	const withCatalog = I.newReviewerRow(3, groups);
 	// 有模型目录时给子智能体（现在只剩这一种「用 DSH 里配好的模型」的方式）。
@@ -1718,10 +1798,18 @@ function findAll(node, predicate) {
 	const activeList = findAll(element, (node) => node.props?.className === 'dsh-review-active-item');
 	check('J 顶部列出全部启用的评审者', activeList.length === 2, String(activeList.length));
 	check('J 顶部列出 id 与指向', findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children).join(',') === 'codex,deep', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-id').map((node) => node.props.children)));
-	check('J 顶部显示指向的可执行名/子智能体', findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children).join(' | ') === 'cli · codex | subagent · spawn · deepseek-v4.1-flash', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children)));
+	check('J 顶部显示指向的可执行名/模型路由', findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children).join(' | ') === 'cli · codex | subagent · bailian/deepseek-v4.1-flash', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-active-meta').map((node) => node.props.children)));
 	// defaultReviewers 是 ['codex']，所以只有 codex 那行是勾着的。
 	const activeItems = findAll(element, (node) => node.props?.className === 'dsh-review-active-item');
 	check('J 顶部开关反映勾选状态', activeItems.length === 2 && activeItems[0].props.children[0].props.checked === true && activeItems[1].props.children[0].props.checked === false, JSON.stringify(activeItems.map((item) => item.props.children[0].props.checked)));
+	// 子智能体的 provider/模型合成一个按 provider 分组的选择器：当前值不在目录里时
+	// 先给一条「当前配置」，再是两个 provider 分组、三个模型。
+	const modelGroups = findAll(element, (node) => node.type === 'MenuGroup');
+	check('J 模型选择器按 provider 分组', modelGroups.length === 3 && modelGroups[0].props.label === 'modelNotInCatalog' && modelGroups[1].props.label === '百炼' && modelGroups[2].props.label === 'DeepSeek', JSON.stringify(modelGroups.map((group) => group.props.label)));
+	const modelOptions = findAll(element, (node) => node.props?.role === 'menuitemradio');
+	check('J 合并选择器列出目录里的模型', modelOptions.length === 4, String(modelOptions.length));
+	check('J 触发器同时显示模型与 provider', findAll(element, (node) => node.props?.className === 'dsh-review-model-trigger-provider').map((node) => node.props.children).join(',') === '百炼', JSON.stringify(findAll(element, (node) => node.props?.className === 'dsh-review-model-trigger-provider').map((node) => node.props.children)));
+	check('J 不再单独渲染 agentProvider 下拉', findAll(element, (node) => node.props?.id === 'reviewer-1-agent-provider').length === 0);
 	check('J 已勾选时不显示告警', findAll(element, (node) => node.props?.className === 'dsh-review-invalid').length === 0);
 	// 评审者定义区：行编辑器 + 增删都在
 	check('J 每行评审者有删除按钮', findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length === 2, String(findAll(element, (node) => node.type === 'Button').filter((node) => node.props.children === 'remove').length));
@@ -1771,8 +1859,32 @@ function findAll(node, predicate) {
 	const model = captured.models[0];
 	const view = { shell: model.shell(), fields: Object.fromEntries(model.specs.map((entry) => [entry.field, model.field(entry.field)])) };
 	const element = captured.registrations[0].render({ view: 'page', t: (key) => key, ...face, useReviewConfigForm: (selector) => selector(view), useReviewCatalog: (selector) => selector(face.hooks.reviewCatalog.getSnapshot()) });
-	check('J 目录失败时提示可见', findAll(element, (node) => node.props?.children === 'catalogFailed').length === 1);
+	check('J 目录失败时提示可见', findAll(element, (node) => node.props?.children === 'catalogFailed').length >= 1);
 	check('J 目录失败时仍渲染表单', element?.type !== undefined && findAll(element, (node) => node.type === 'Input').length > 0);
+	// 合并选择器在目录不可用时退回两个输入框，当前值仍然可编辑。
+	check('J 目录失败时模型选择退回手填', findAll(element, (node) => node.props?.className === 'dsh-review-model-fallback').length === 1);
+}
+
+{
+	// 回归：刚装插件时 remote.session 还没注册。以前 apply 时取一次就永远不再试，
+	// provider 下拉一直空着，必须关开插件才恢复。现在声明依赖，服务晚到也会补加载。
+	const { mod, ctx, captured } = await loadClientBundle({ deferRemote: true });
+	mod.apply(ctx);
+	const face = captured.registrations[0].options.inject();
+	const idleSnapshot = face.hooks.reviewCatalog.getSnapshot();
+	check('J 目录服务没就绪时保持 idle', idleSnapshot.status === 'idle', idleSnapshot.status);
+	check('J 声明了 remote.session 依赖', captured.injects.some((deps) => Array.isArray(deps) && deps.includes('remote.session')), JSON.stringify(captured.injects));
+	check('J 依赖就绪前不伪造空目录', face.hooks.reviewCatalog.getSnapshot().groups.length === 0);
+	check('J 保存了服务就绪后的回调', typeof captured.remoteInject === 'function');
+	captured.remoteInject({
+		get: (service) =>
+			service === 'remote.session'
+				? { modelCatalog: async () => ({ ok: true, value: { groups: [{ id: 'bailian', name: '百炼', models: [{ id: 'qwen3.8-max' }] }] } }) }
+				: undefined,
+	});
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	check('J 服务晚到时自动补加载目录', face.hooks.reviewCatalog.getSnapshot().status === 'ready' && face.hooks.reviewCatalog.getSnapshot().groups.length === 1, JSON.stringify(face.hooks.reviewCatalog.getSnapshot()));
+	check('J 目录更新换了新快照对象', face.hooks.reviewCatalog.getSnapshot() !== idleSnapshot, 'same object');
 }
 
 /* ────────────────────────────── J2. 自动保存 ────────────────────────────── */
