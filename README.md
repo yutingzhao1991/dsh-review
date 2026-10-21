@@ -191,8 +191,9 @@ knowing:
   CLIs. `base` and `commit` are mutually exclusive. A range plus `instructions` works for
   subagents but not for the codex CLI (its range flag and PROMPT exclude each other): if every
   selected reviewer is such a CLI the call is rejected up front, otherwise the CLI ones are named
-  in the report footnotes — put the focus
-  in a mode's `prompt` instead.
+  in the report footnotes. To keep both the range and the focus, add a subagent reviewer; putting
+  the focus in a mode's `prompt` does not help, since a mode prompt is skipped as well whenever a
+  range is given (next bullet).
 - A mode's prompt reaches codex only when no range is given (its CLI refuses both at once); the
   range is always honoured, and the report says when the prompt was skipped.
 - codex only runs inside the directories it trusts (`~/.codex/config.toml`).

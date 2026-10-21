@@ -130,7 +130,7 @@ function buildToolDescription(settings) {
 		'',
 		schemaAvailable ? '配置也可以在 GUI 里改：侧边栏 Plugins → dsh-review 的行/包页面（解析与保存都由宿主负责）。' : 'GUI 表单在本部署不可用（找不到 @deepseek-ai/schemastery），配置请改 profile 的 cordis.patch.yml。',
 		'不传参数时评审工作区里 staged / unstaged / untracked 的全部改动。',
-		'参数规则：`base` 与 `commit` **互斥**，只能给一个。`base`/`commit` 可以和 `instructions` 同时给——只要选中的评审者里有能同时收「范围 + 关注点」的（subagent 类都可以）；全是「PROMPT 与范围开关互斥」的 CLI 时会被直接拒绝，那种情况请把关注点写进 `mode` 的提示词。同时给时，收不了 instructions 的评审者只收范围（范围优先），报告脚注会点名是谁没收到。',
+		'参数规则：`base` 与 `commit` **互斥**，只能给一个。`base`/`commit` 可以和 `instructions` 同时给——只要选中的评审者里有能同时收「范围 + 关注点」的（subagent 类都可以）；全是「PROMPT 与范围开关互斥」的 CLI 时会被直接拒绝（二者只能留一个，或加一个 subagent 评审者；写进 `mode` 的提示词同样会被跳过）。同时给时，收不了 instructions 的评审者只收范围（范围优先），报告脚注会点名是谁没收到。',
 		'`reviewers` 只能从上面列出的评审者里选，写别的 id 会直接报错（插件没有「按需指名模型」这条路）。',
 		'单次评审不一定穷尽（同一份改动，各评审者可能各有遗漏）：要覆盖度就用 `mode` 的深度模式，或者一次多选几个评审者。',
 		'评审通常要跑几分钟：默认**立即**返回 job id（不等待），用 job_output 读结果，跑完会自动通知；调用方可自行决定什么时候放弃。',
@@ -162,7 +162,7 @@ function buildParameters(settings) {
 			commit: { type: 'string', description: '评审该提交引入的改动（commit sha）。与 base 互斥，只能给一个；可以和 instructions 同时给（前提见工具描述）。' },
 			instructions: {
 				type: 'string',
-				description: '附加评审指令，用来聚焦关注点（如「只看并发与错误处理」）。不传 base/commit 时按未提交的改动评审；传了范围时，只有能同时收「范围 + 关注点」的评审者（subagent 类）会收到它，其余只收范围并在报告脚注里被点名。',
+				description: '附加评审指令，用来聚焦关注点（如「只看并发与错误处理」）。不传 base/commit 时按未提交的改动评审；传了范围时，只有能同时收「范围 + 关注点」的评审者（subagent 类）会收到它，其余只收范围并在报告脚注里被点名；选中的评审者全是 codex 这类「PROMPT 与范围开关互斥」的 CLI 时会直接报错（范围与 instructions 只能留一个）。',
 			},
 			doctor: {
 				type: 'boolean',
@@ -402,7 +402,11 @@ export function apply(ctx, config) {
 			// 全都被限制才报错——放在起 job 之前，这样是即时的工具错误，而不是失败的后台任务。
 			const cliOnly = reviewers.filter((reviewer) => reviewer.promptReplacesRange);
 			if (target.base.length + target.commit.length > 0 && target.instructions.length > 0 && cliOnly.length === reviewers.length) {
-				throw new Error(`base / commit 不能与 instructions 同时给：选中的评审者（${cliOnly.map((reviewer) => reviewer.id).join('、')}）都是 CLI，它们的自定义评审指令 [PROMPT] 与范围开关互斥。要「范围 + 关注点」请改用 subagent 评审者，或把关注点写进 mode 的 prompt。`);
+				// 给出的必须是真能走通的路：mode 的 prompt 对有范围的 codex 同样会被跳过
+				// （nativePrompt 只在没范围时才投递），把它写成建议只会让调用方再撞一次。
+				throw new Error(
+					`范围与 instructions 不能同时交给这些评审者（${cliOnly.map((reviewer) => reviewer.id).join('、')}）：它们是「[PROMPT] 与范围开关互斥」的 CLI（如 codex 的 \`exec review\`）。只能二选一：要范围就去掉 instructions（想同时保留关注点，加一个 subagent 评审者，它两者都能收）；要关注点就去掉 base/commit，改为评审未提交改动——instructions 才会作为 PROMPT 传给这些 CLI。把关注点写进 mode 的 prompt 也不行——有范围时模式提示词同样会被跳过。`,
+				);
 			}
 
 			// 先确认 base/commit 真的存在：否则会白起一轮评审者，最后报 completed 却什么都没评。

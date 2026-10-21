@@ -324,6 +324,8 @@ console.log('\nB. 工具描述与参数校验');
 	// 而不是过去那句「三者最多给一个」——模型按旧文案行事就永远不会尝试 base + instructions。
 	check('B 描述写明 base 与 commit 互斥', description.includes('`base` 与 `commit` **互斥**'), description.slice(-700));
 	check('B 描述写明范围+关注点按评审者能力有条件放行', description.includes('可以和 `instructions` 同时给') && description.includes('脚注'), description.slice(-700));
+	// 旧文案把「写进 mode 的 prompt」当出路，但有范围时模式提示词同样被跳过——那是一条死路。
+	check('B 全 CLI 拒绝时不把 mode 提示词当出路', description.includes('写进 `mode` 的提示词同样会被跳过'), description.slice(-700));
 	check('B 描述说明 reviewers 只能从列表里选', description.includes('只能从上面列出的评审者里选'));
 	check('B 描述说明默认立即返回 job id', description.includes('立即') && description.includes('job_output'));
 	{
@@ -331,6 +333,7 @@ console.log('\nB. 工具描述与参数校验');
 		check('B reviewers 参数列出可选 id', props.reviewers.description.includes('codex') && props.reviewers.description.includes('claude'), props.reviewers.description);
 		check('B base/commit 参数说明互斥且可与 instructions 同时给', props.base.description.includes('与 commit 互斥') && props.commit.description.includes('与 base 互斥') && props.base.description.includes('instructions'), props.base.description);
 		check('B instructions 参数说明范围+关注点的条件与脚注', props.instructions.description.includes('脚注') && props.instructions.description.includes('subagent'), props.instructions.description);
+		check('B instructions 参数说明全 CLI 时直接报错', props.instructions.description.includes('只能留一个'), props.instructions.description);
 	}
 	check('B 参数含 reviewers/mode/base/commit/instructions/doctor', Object.keys(h.definition.parameters.properties).join(',') === 'reviewers,mode,base,commit,instructions,doctor');
 	// 描述里的可用性标注只认「含 / 的绝对路径」：本机事故是 patch 钉死的绝对路径被依赖重装
@@ -829,9 +832,16 @@ console.log('\nG3. 范围 + 关注点');
 	const prompt = subagentCalls[0]?.request.prompt[0].text ?? '';
 	check('G3 关注点真的传给了子智能体', prompt.includes('只看并发'), prompt.slice(0, 200));
 
-	// 全部都是 CLI 时才报错，且错误里点名是哪些评审者。
+	// 全部都是 CLI 时才报错，且错误里点名是哪些评审者；给出的出路必须是真能走通的
+	// （去掉范围 / 去掉关注点 / 加 subagent）——旧文案推荐「写进 mode 的 prompt」，
+	// 但有范围时模式提示词同样会被跳过，等于让调用方再撞一次。
 	const cli = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, report: 'x' } });
-	await rejects('G3 全是 CLI 时范围 + 关注点报错', () => run(cli, { base: 'main', instructions: '只看并发' }));
+	const cliError = await rejects('G3 全是 CLI 时范围 + 关注点报错', () => run(cli, { base: 'main', instructions: '只看并发' }));
+	check(
+		'G3 报错给出可行出路',
+		cliError !== undefined && cliError.message.includes('codex') && cliError.message.includes('subagent') && cliError.message.includes('去掉 base/commit') && cliError.message.includes('也不行'),
+		String(cliError?.message),
+	);
 
 	// 混合集合：放行，并在材料说明里点名没收到关注点的那个。
 	const mixed = await loadPlugin({
