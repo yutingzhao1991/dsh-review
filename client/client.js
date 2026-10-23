@@ -1,5 +1,5 @@
 /**
- * dsh-review 的浏览器半边：在侧边栏 Plugins → dsh-review 的行/包页面上渲染配置表单。
+ * dsh-review 的浏览器半边：侧边栏 Plugins → dsh-review 的配置表单，以及对话与输入框之间的评审状态条。
  *
  * 这是手写的 `__ModuleLoader__` 工厂 bundle（DSH 客户端模块系统的加载格式），
  * 不需要构建工具：externals 只有 `react` 与 `@deepseek-ai/dsh-client-ui-primitives`，
@@ -30,6 +30,7 @@ window.__ModuleLoader__.load({
 		const P = require('@deepseek-ai/dsh-client-ui-primitives');
 		const h = react.createElement;
 		const useState = react.useState;
+		const useEffect = react.useEffect;
 
 		/** 字典命名空间（本插件自己拥有）。 */
 		const NS = 'dsh-review';
@@ -149,6 +150,30 @@ window.__ModuleLoader__.load({
 			unavailable: '该插件当前未加载，暂时无法配置。',
 			saving: '保存中…',
 			saveFailed: '本部署没有接受这些值，已保留你的修改。',
+			'status.label': '评审',
+			'status.idle': '尚未评审',
+			'status.running': '第 {round} 轮评审中',
+			'status.runningMany': '{count} 个评审进行中',
+			'status.rounds': '已评审 {count} 轮',
+			'status.failed': '第 {round} 轮失败',
+			'status.killed': '第 {round} 轮已取消',
+			'status.interrupted': '第 {round} 轮已中断',
+			'status.panelTitle': '评审记录',
+			'status.panelCount': '共 {count} 轮',
+			'status.panelEmpty': '这个会话还没有评审记录。让智能体调用 review 工具开始第一次评审。',
+			'status.scopeUncommitted': '未提交改动',
+			'status.scopeBase': '相对 {ref}',
+			'status.scopeCommit': '提交 {ref}',
+			'status.scopeUnknown': '范围未知',
+			'status.stateRunning': '进行中',
+			'status.stateCompleted': '已完成',
+			'status.stateFailed': '失败',
+			'status.stateKilled': '已取消',
+			'status.stateInterrupted': '已中断',
+			'status.more': '+{count}',
+			'status.duration': '{minutes} 分 {seconds} 秒',
+			'status.durationSeconds': '{seconds} 秒',
+			'status.aria': '评审状态：{summary}',
 		};
 
 		const en = {
@@ -251,6 +276,30 @@ window.__ModuleLoader__.load({
 			unavailable: 'This plugin is not loaded right now, so it cannot be configured.',
 			saving: 'Saving…',
 			saveFailed: 'This deployment did not accept these values; your edits were kept.',
+			'status.label': 'Review',
+			'status.idle': 'Not reviewed yet',
+			'status.running': 'Round {round} in progress',
+			'status.runningMany': '{count} reviews in progress',
+			'status.rounds': '{count} round(s) reviewed',
+			'status.failed': 'Round {round} failed',
+			'status.killed': 'Round {round} cancelled',
+			'status.interrupted': 'Round {round} interrupted',
+			'status.panelTitle': 'Review history',
+			'status.panelCount': '{count} round(s)',
+			'status.panelEmpty': 'No review in this session yet. Ask the agent to call the review tool to start one.',
+			'status.scopeUncommitted': 'Uncommitted changes',
+			'status.scopeBase': 'Against {ref}',
+			'status.scopeCommit': 'Commit {ref}',
+			'status.scopeUnknown': 'Unknown scope',
+			'status.stateRunning': 'Running',
+			'status.stateCompleted': 'Completed',
+			'status.stateFailed': 'Failed',
+			'status.stateKilled': 'Cancelled',
+			'status.stateInterrupted': 'Interrupted',
+			'status.more': '+{count}',
+			'status.duration': '{minutes}m {seconds}s',
+			'status.durationSeconds': '{seconds}s',
+			'status.aria': 'Review status: {summary}',
 		};
 
 		/* ────────────────────────── 纯逻辑（自测直接覆盖） ────────────────────────── */
@@ -421,6 +470,167 @@ window.__ModuleLoader__.load({
 			const list = splitList(selectedText);
 			const updated = next ? (list.includes(id) ? list : [...list, id]) : list.filter((value) => value !== id);
 			return updated.join(', ');
+		}
+
+		/* ── 评审状态条（宿主 projection 的客户端展示） ── */
+
+		/** 状态条最多显示几个评审者胶囊；其余折成 `+N`，完整名单在展开面板里。 */
+		const REVIEW_CHIP_LIMIT = 2;
+
+		/** 与宿主 lib/status.js 的 REVIEW_STATUS_KEY 必须一致。 */
+		const REVIEW_STATUS_KEY = 'dsh-review/status';
+
+		function formatReviewDuration(milliseconds, t) {
+			const total = Math.max(0, Math.round((Number.isFinite(milliseconds) ? milliseconds : 0) / 1000));
+			const minutes = Math.floor(total / 60);
+			const seconds = total % 60;
+			if (minutes === 0) return t('status.durationSeconds').replace('{seconds}', String(seconds));
+			return t('status.duration').replace('{minutes}', String(minutes)).replace('{seconds}', String(seconds).padStart(2, '0'));
+		}
+
+		/** 一次评审的范围文案：未提交 / 相对分支 / 某个提交。 */
+		function reviewScopeText(run, t) {
+			const scope = typeof run?.scope === 'string' ? run.scope : 'unknown';
+			const ref = typeof run?.scopeRef === 'string' ? run.scopeRef : '';
+			if (scope === 'uncommitted') return t('status.scopeUncommitted');
+			if (scope === 'base') return t('status.scopeBase').replace('{ref}', ref);
+			if (scope === 'commit') return t('status.scopeCommit').replace('{ref}', ref);
+			return t('status.scopeUnknown');
+		}
+
+		/**
+		 * 最新一轮不是「未提交改动」时，在摘要里补上范围。
+		 *
+		 * 否则一次 `--commit abc1234` 的评审会显示成「已评审 N 轮」，让人误以为当前工作区
+		 * 也评过了。未提交是默认范围，不额外占位置。
+		 */
+		function reviewScopeSuffix(run, t) {
+			if (run === null || typeof run !== 'object') return '';
+			if (run.scope === 'base' || run.scope === 'commit') return ` · ${reviewScopeText(run, t)}`;
+			return '';
+		}
+
+		/** 单轮状态文案；面板里用。 */
+		function reviewRunState(run, t) {
+			const status = typeof run?.status === 'string' ? run.status : 'failed';
+			if (status === 'running') return t('status.stateRunning');
+			if (status === 'completed') return t('status.stateCompleted');
+			if (status === 'killed') return t('status.stateKilled');
+			if (status === 'interrupted') return t('status.stateInterrupted');
+			return t('status.stateFailed');
+		}
+
+		/** 状态条 → StateDot 的语义状态。 */
+		function reviewStatusDot(state) {
+			if (state === 'running') return 'ongoing';
+			if (state === 'failed' || state === 'killed' || state === 'interrupted') return 'warning';
+			if (state === 'done') return 'done';
+			return 'idle';
+		}
+
+		/** 面板里的时间：只显示本地时分，不引入日期格式化依赖。 */
+		function formatReviewTime(value) {
+			if (!Number.isFinite(value) || value <= 0) return '';
+			const date = new Date(value);
+			return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+		}
+
+		/**
+		 * 把整份 projection 压成状态条要显示的一行。
+		 *
+		 * 优先级：有任务在跑 → 报「第几轮评审中」+ 已用时；否则报最近一轮的结果。
+		 * `state` 同时给 CSS 和 StateDot 用；`reviewers` 是本次展示的评审者集合。
+		 *
+		 * @param {unknown} status - `useProjection('dsh-review/status')` 的值。
+		 * @param {number} now - 当前时间（毫秒），由组件每秒刷新。
+		 * @param {(key: string) => string} t - 当前语言。
+		 * @returns {{ state: string, text: string, meta: string, reviewers: string[], aria: string }}
+		 */
+		function reviewStatusSummary(status, now, t) {
+			const value = status !== null && typeof status === 'object' ? status : {};
+			const runs = Array.isArray(value.runs) ? value.runs.filter((run) => run !== null && typeof run === 'object') : [];
+			const declaredRounds = Number.isSafeInteger(value.rounds) && value.rounds >= 0 ? value.rounds : 0;
+			const rounds = Math.max(declaredRounds, runs.length);
+			if (rounds === 0) {
+				const text = t('status.idle');
+				return { state: 'idle', text, meta: '', reviewers: [], aria: t('status.aria').replace('{summary}', text) };
+			}
+
+			const running = runs.filter((run) => run.status === 'running');
+			if (running.length > 0) {
+				const latest = running[running.length - 1];
+				const round = Number.isSafeInteger(latest.round) && latest.round > 0 ? latest.round : rounds;
+				const baseText = running.length > 1 ? t('status.runningMany').replace('{count}', String(running.length)) : t('status.running').replace('{round}', String(round));
+				const text = `${baseText}${reviewScopeSuffix(latest, t)}`;
+				const meta = Number.isFinite(latest.startedAt) ? formatReviewDuration((Number.isFinite(now) ? now : Date.now()) - latest.startedAt, t) : '';
+				const reviewers = [];
+				for (const run of running) for (const id of Array.isArray(run.reviewers) ? run.reviewers : []) if (!reviewers.includes(id)) reviewers.push(id);
+				const aria = t('status.aria').replace('{summary}', meta.length > 0 ? `${text} · ${meta}` : text);
+				return { state: 'running', text, meta, reviewers, aria };
+			}
+
+			const latest = runs.length > 0 ? runs[runs.length - 1] : undefined;
+			const latestStatus = typeof latest?.status === 'string' ? latest.status : 'completed';
+			const round = Number.isSafeInteger(latest?.round) && latest.round > 0 ? latest.round : rounds;
+			const state = latestStatus === 'failed' || latestStatus === 'killed' || latestStatus === 'interrupted' ? latestStatus : 'done';
+			const baseText =
+				state === 'failed'
+					? t('status.failed').replace('{round}', String(round))
+					: state === 'killed'
+						? t('status.killed').replace('{round}', String(round))
+						: state === 'interrupted'
+							? t('status.interrupted').replace('{round}', String(round))
+							: t('status.rounds').replace('{count}', String(rounds));
+			const text = `${baseText}${reviewScopeSuffix(latest, t)}`;
+			const reviewers = Array.isArray(value.reviewers) ? value.reviewers.filter((id) => typeof id === 'string' && id.length > 0) : [];
+			const aria = t('status.aria').replace('{summary}', reviewers.length > 0 ? `${text} · ${reviewers.join(', ')}` : text);
+			return { state, text, meta: '', reviewers, aria };
+		}
+
+		/** 评审者胶囊：最多 3 个，余下折成 +N；空数组不渲染。 */
+		function reviewReviewerChips(reviewers, t) {
+			const list = Array.isArray(reviewers) ? reviewers.filter((id) => typeof id === 'string' && id.length > 0) : [];
+			const shown = list.slice(0, REVIEW_CHIP_LIMIT);
+			const rest = list.length - shown.length;
+			return {
+				shown,
+				more: rest > 0 ? t('status.more').replace('{count}', String(rest)) : '',
+				title: list.join(', '),
+			};
+		}
+
+		/**
+		 * 状态条是否该出现。
+		 *
+		 * 三条规则，按优先级：
+		 * 1. 对话还是空的（没有消息、没有正在跑的首轮）→ 不显示；
+		 * 2. 有评审正在跑 → 显示，哪怕这一轮暂时还没有改动记录；
+		 * 3. 官方 workspace-changes 可用且最新一轮没有改动事件 → 不显示。
+		 *
+		 * `workspaceChanges` 缺失时不做第 3 条（不能因为拿不到能力就误藏）。
+		 *
+		 * @param {unknown} session - `conversation.input.dock` 的 SessionSnapshot。
+		 * @param {unknown} status - `useProjection('dsh-review/status')` 的值。
+		 * @returns {boolean}
+		 */
+		function reviewStatusVisible(session, status) {
+			if (session === null || typeof session !== 'object') return false;
+			const pending = Array.isArray(session.pendingSubmissions) ? session.pendingSubmissions.length : 0;
+			if (session.blank === true && session.promptAttempted !== true && pending === 0 && session.running !== true) return false;
+			if (status === null || typeof status !== 'object') return false;
+			// 首轮 turn/start 之前 agent 就可能已经在改文件；运行中就展示，别等 turn 事件。
+			if (session.running === true) return true;
+
+			const running = Number.isSafeInteger(status.running) ? status.running : 0;
+			if (running > 0) return true;
+
+			const changes = status.changes;
+			if (changes === null || typeof changes !== 'object' || changes.enabled !== true) return true;
+			const currentTurn = Number.isSafeInteger(changes.currentTurn) ? changes.currentTurn : 0;
+			if (currentTurn <= 0) return true;
+			if (changes.inTurn === true) return true;
+			const changesTurn = Number.isSafeInteger(changes.changesTurn) ? changes.changesTurn : 0;
+			return changesTurn === currentTurn;
 		}
 
 		/** CLI 预设 → 默认可执行文件名。 */
@@ -1662,6 +1872,206 @@ h5.dsh-review-subgroup-title {
 .dsh-review-autosave[data-state='blocked'] { color: var(--dsw-alias-state-error-primary, #d93026); }
 .dsh-review-autosave[data-state='failed'] .dsh-review-autosave-dot,
 .dsh-review-autosave[data-state='blocked'] .dsh-review-autosave-dot { opacity: 1; }
+
+/* ── 对话与输入框之间的评审状态条 ── */
+.dsh-review-status-zone {
+  display: flex;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0 var(--dsh-composer-side-clearance, 16px);
+}
+.dsh-review-status {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+.dsh-review-status-summary {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: 0;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
+  white-space: nowrap;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.dsh-review-status-summary::-webkit-details-marker { display: none; }
+.dsh-review-status-summary:hover,
+.dsh-review-status[open] > .dsh-review-status-summary {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-review-status-summary:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4d6bfe));
+  outline-offset: 2px;
+}
+.dsh-review-status-label {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: 500;
+}
+.dsh-review-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dsh-review-status-meta {
+  flex: none;
+  color: var(--dsw-alias-label-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-review-status-reviewers {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  max-width: 230px;
+  min-width: 0;
+  overflow: hidden;
+}
+.dsh-review-status-reviewer {
+  flex: none;
+  box-sizing: border-box;
+  max-width: 10ch;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+  border-radius: 999px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-review-status-more {
+  flex: none;
+  color: var(--dsw-alias-label-quaternary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.dsh-review-status-chevron {
+  flex: none;
+  display: inline-flex;
+  color: var(--dsw-alias-label-quaternary);
+  transition: transform 0.15s ease;
+}
+.dsh-review-status[open] .dsh-review-status-chevron { transform: rotate(180deg); }
+.dsh-review-status[data-state='running'] .dsh-review-status-text { color: var(--dsw-alias-label-secondary); }
+.dsh-review-status[data-state='failed'] .dsh-review-status-text { color: var(--dsw-alias-state-error-primary, #d93026); }
+.dsh-review-status[data-state='killed'] .dsh-review-status-text,
+.dsh-review-status[data-state='interrupted'] .dsh-review-status-text { color: var(--dsw-alias-state-warn-primary, #b26a00); }
+.dsh-review-status-panel {
+  position: absolute;
+  z-index: 1100;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  box-sizing: border-box;
+  width: min(360px, calc(100vw - 32px));
+  max-height: 280px;
+  padding: 6px;
+  overflow-y: auto;
+  transform: translateX(-50%);
+  border-radius: var(--dsw-radius-lg, 14px);
+  background: var(--dsw-alias-bg-layer-1, var(--dsw-specific-menu));
+  backdrop-filter: var(--dsw-menu-backdrop-filter);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  color: var(--dsw-alias-label-secondary);
+  cursor: default;
+}
+.dsh-review-status-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 6px 8px;
+}
+.dsh-review-status-panel-title {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.dsh-review-status-panel-count {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+}
+.dsh-review-status-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.dsh-review-status-run {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: var(--dsw-radius-md, 12px);
+}
+.dsh-review-status-run:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-review-status-run-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dsh-review-status-run-round {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+}
+.dsh-review-status-run-state {
+  flex: none;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+.dsh-review-status-run[data-state='running'] .dsh-review-status-run-state { color: var(--dsw-alias-state-business-primary, #4d6bfe); }
+.dsh-review-status-run[data-state='completed'] .dsh-review-status-run-state { color: var(--dsw-alias-state-success-primary, #188038); }
+.dsh-review-status-run[data-state='failed'] .dsh-review-status-run-state { color: var(--dsw-alias-state-error-primary, #d93026); }
+.dsh-review-status-run[data-state='killed'] .dsh-review-status-run-state,
+.dsh-review-status-run[data-state='interrupted'] .dsh-review-status-run-state { color: var(--dsw-alias-state-warn-primary, #b26a00); }
+.dsh-review-status-run-when {
+  flex: none;
+  margin-left: auto;
+  color: var(--dsw-alias-label-quaternary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+}
+.dsh-review-status-run-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-review-status-empty {
+  padding: 8px 6px 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
 `.trim();
 
 		/** 注入一次样式；已注入过（HMR/重挂载）就不再重复插标签。 */
@@ -1828,6 +2238,93 @@ h5.dsh-review-subgroup-title {
 							h('h5', { className: 'dsh-review-subgroup-title' }, t(group.label)),
 							FIELDS.filter((field) => field.section === 'advanced' && field.group === group.key).map(renderField),
 						),
+					),
+				),
+			);
+		}
+
+		/**
+		 * 对话与输入框之间的评审状态条。
+		 *
+		 * 数据只来自宿主 projection（`useProjection(REVIEW_STATUS_KEY)`），组件本身不做
+		 * 网络请求、不拼 job 状态。`<details>` 让展开/收起不需要额外的状态管理，面板
+		 * 绝对定位在状态条上方，所以展开不会把输入框顶动。
+		 */
+		function ReviewStatusDock(props) {
+			const t = props.t;
+			const status = typeof props.useProjection === 'function' ? props.useProjection(REVIEW_STATUS_KEY) : undefined;
+			const visible = reviewStatusVisible(props.session, status);
+			const [now, setNow] = useState(() => Date.now());
+			const runningCount = status !== null && typeof status === 'object' && Number.isSafeInteger(status.running) ? status.running : 0;
+			useEffect(() => {
+				if (!visible || runningCount <= 0) return undefined;
+				const timer = setInterval(() => setNow(Date.now()), 1000);
+				return () => clearInterval(timer);
+			}, [visible, runningCount]);
+			// projection 还没到达（宿主未注册 / 基线未到）时不伪造「尚未评审」。
+			if (!visible || status === null || typeof status !== 'object') return null;
+
+			const summary = reviewStatusSummary(status, now, t);
+			const chips = reviewReviewerChips(summary.reviewers, t);
+			const runs = Array.isArray(status.runs) ? status.runs.filter((run) => run !== null && typeof run === 'object').slice().reverse() : [];
+			const declaredRounds = Number.isSafeInteger(status.rounds) && status.rounds >= 0 ? status.rounds : 0;
+			const rounds = Math.max(declaredRounds, runs.length);
+
+			return h(
+				'div',
+				{ className: 'dsh-review-status-zone' },
+				h(
+					'details',
+					{ className: 'dsh-review-status', 'data-state': summary.state, 'data-review-status': summary.state },
+					h(
+						'summary',
+						{ className: 'dsh-review-status-summary', 'aria-label': summary.aria, title: summary.aria },
+						h(P.StateDot, { state: reviewStatusDot(summary.state) }),
+						h('span', { className: 'dsh-review-status-label' }, t('status.label')),
+						h('span', { className: 'dsh-review-status-text' }, summary.text),
+						summary.meta.length > 0 ? h('span', { className: 'dsh-review-status-meta' }, summary.meta) : null,
+						chips.shown.length > 0
+							? h(
+									'span',
+									{ className: 'dsh-review-status-reviewers', title: chips.title },
+									chips.shown.map((id) => h('span', { key: id, className: 'dsh-review-status-reviewer' }, id)),
+									chips.more.length > 0 ? h('span', { className: 'dsh-review-status-more' }, chips.more) : null,
+								)
+							: null,
+						h('span', { className: 'dsh-review-status-chevron', 'aria-hidden': 'true' }, h(P.IconChevronDownOutlineRegular, { size: 12 })),
+					),
+					h(
+						'div',
+						{ className: 'dsh-review-status-panel', role: 'region', 'aria-label': t('status.panelTitle') },
+						h(
+							'div',
+							{ className: 'dsh-review-status-panel-head' },
+							h('span', { className: 'dsh-review-status-panel-title' }, t('status.panelTitle')),
+							h('span', { className: 'dsh-review-status-panel-count' }, t('status.panelCount').replace('{count}', String(rounds))),
+						),
+						runs.length === 0
+							? h('div', { className: 'dsh-review-status-empty' }, t('status.panelEmpty'))
+							: h(
+									'ol',
+									{ className: 'dsh-review-status-runs' },
+									runs.map((run) => {
+										const round = Number.isSafeInteger(run.round) && run.round > 0 ? run.round : rounds;
+										const reviewers = Array.isArray(run.reviewers) ? run.reviewers.filter((id) => typeof id === 'string' && id.length > 0) : [];
+										const meta = [reviewScopeText(run, t), reviewers.join(', '), typeof run.detail === 'string' ? run.detail : ''].filter((part) => part.length > 0).join(' · ');
+										return h(
+											'li',
+											{ key: typeof run.id === 'string' && run.id.length > 0 ? run.id : `round-${round}`, className: 'dsh-review-status-run', 'data-state': run.status },
+											h(
+												'div',
+												{ className: 'dsh-review-status-run-top' },
+												h('span', { className: 'dsh-review-status-run-round' }, `#${round}`),
+												h('span', { className: 'dsh-review-status-run-state' }, reviewRunState(run, t)),
+												h('span', { className: 'dsh-review-status-run-when' }, formatReviewTime(run.startedAt)),
+											),
+											h('div', { className: 'dsh-review-status-run-meta', title: meta }, meta),
+										);
+									}),
+								),
 					),
 				),
 			);
@@ -2189,6 +2686,19 @@ h5.dsh-review-subgroup-title {
 					),
 				'dsh-review: bundle config page',
 			);
+
+			// 对话与输入框之间的评审状态条。slots.inject 在 conversation 包装载后回调；
+			// 没有 conversation 座位的部署（例如非 Web）只是没有这一条，不影响配置页。
+			ctx.effect(
+				() =>
+					ctx.slots.inject('conversation.input.dock', () =>
+						ctx.slots.register(
+							{ name: 'conversation.input.dock', id: 'review-status', order: 30, locale: NS },
+							ReviewStatusDock,
+						),
+					),
+				'dsh-review: review status dock',
+			);
 		}
 
 		exports.apply = apply;
@@ -2221,6 +2731,18 @@ h5.dsh-review-subgroup-title {
 			KINDS,
 			CLI_PRESETS,
 			STRENGTHS,
+			REVIEW_STATUS_KEY,
+			REVIEW_CHIP_LIMIT,
+			reviewStatusSummary,
+			reviewReviewerChips,
+			reviewScopeText,
+			reviewRunState,
+			reviewScopeSuffix,
+			reviewStatusVisible,
+			reviewStatusDot,
+			formatReviewDuration,
+			formatReviewTime,
+			ReviewStatusDock,
 		};
 		return module.exports;
 	},

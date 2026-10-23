@@ -6,13 +6,15 @@
  *   D LLM 评审者        E 子智能体评审者      F 编排
  *   G 边界              H 回归                I 模型发现与按需指名
  *   J 浏览器半边        J2 自动保存           K GUI 配置的宿主半边
+ *   L schema 解析       M 评审状态投影         N 评审状态条
  *
  * 假 ctx 自测：不起宿主进程，也不跑真的 codex / 模型。覆盖
  *
  * - 配置归一化（agents / models / reviewers 展开、非法项降级、模式解析、评审者选择）；
  * - 三种评审者：CLI（argv 拼装 + 结论落盘）、LLM（ctx.llm 流式）、子智能体（ctx.subagents）；
  * - 变更收集：git 摘要、diff 包按需收集、未跟踪文件正文；
- * - 编排：就地返回 / 后台返回 / 纯后台 / 失败收敛 / 汇总 / 截断 / 系统提示词注入。
+ * - 编排：就地返回 / 后台返回 / 纯后台 / 失败收敛 / 汇总 / 截断 / 系统提示词注入；
+ * - 评审状态条：job 生命周期 + `turn/*` / `workspace/changes` 折叠、空对话与无改动隐藏。
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, readdirSync, existsSync, symlinkSync } from 'node:fs';
@@ -1439,6 +1441,8 @@ async function loadClientBundle(options = {}) {
 		},
 		// forceInitial 让用例可以「点开」默认收起的分区（桩件没有真正的 state 更新）。
 		useState: (initial) => [options.forceInitial === undefined ? (typeof initial === 'function' ? initial() : initial) : options.forceInitial, () => {}],
+		// 状态条只在 running 时开定时器；测试里不跑副作用，避免留下 interval。
+		useEffect: () => {},
 		useId: () => 'id',
 	};
 	class SettingsFormModel {
@@ -1527,6 +1531,8 @@ async function loadClientBundle(options = {}) {
 	primitives.Menu = (props) => ({ type: 'Menu', props, children: [...asArray(props.anchor), ...asArray(props.children).filter((child) => child !== null && child !== undefined && child !== false)] });
 	primitives.MenuGroup = (props) => ({ type: 'MenuGroup', props, children: asArray(props.children) });
 	for (const name of ['SettingsValueField', 'Switch', 'Checkbox', 'SegmentedControl', 'Input']) primitives[name] = (props) => ({ type: name, props, children: [] });
+	primitives.StateDot = (props) => ({ type: 'StateDot', props, children: [] });
+	primitives.IconChevronDownOutlineRegular = (props) => ({ type: 'IconChevronDownOutlineRegular', props, children: [] });
 	primitives.settingsTextField = (field) => ({ field, format: (value) => (value === undefined || value === null ? '' : String(value)), parse: (text) => (String(text).trim() === '' ? { kind: 'clear' } : { kind: 'set', value: String(text) }) });
 	primitives.settingsNumberField = (field) => ({
 		field,
@@ -1741,7 +1747,7 @@ function findAll(node, predicate) {
 		check('J 字典键数量合理', zhKeys.length >= 80, String(zhKeys.length));
 		// 每个键都要被用到（t('key')、三元里的键、以及 FIELDS 里的 label/hint）
 		const source = readFileSync(new URL('./client/client.js', import.meta.url), 'utf8');
-		const used = new Set([...source.matchAll(/(?<![A-Za-z0-9_$])t\('([A-Za-z0-9]+)'\)/g)].map((match) => match[1]));
+		const used = new Set([...source.matchAll(/(?<![A-Za-z0-9_$])t\('([A-Za-z0-9._-]+)'\)/g)].map((match) => match[1]));
 		for (const match of source.matchAll(/\?\s*'([A-Za-z0-9]+)'\s*:\s*'([A-Za-z0-9]+)'/g)) {
 			used.add(match[1]);
 			used.add(match[2]);
@@ -1752,15 +1758,15 @@ function findAll(node, predicate) {
 		// 反过来也要查：用到的键必须两种语言都有（之前 catalogLoading 就是被删了但还在用，
 		// 界面上会显示成键名——只查「有没有人用」抓不到这种）。
 		// 只看真正的字典查找 `t('key')`：三元里的字符串常量不一定是文案键。
-		const tKeys = new Set([...source.matchAll(/(?<![A-Za-z0-9_$])t\('([A-Za-z0-9]+)'\)/g)].map((match) => match[1]));
+		const tKeys = new Set([...source.matchAll(/(?<![A-Za-z0-9_$])t\('([A-Za-z0-9._-]+)'\)/g)].map((match) => match[1]));
 		const missing = [...tKeys].filter((key) => !zhKeys.includes(key));
 		check('J 用到的文案键都存在', missing.length === 0, missing.join(','));
 	}
 
 	check('J 读取 review 命名空间', captured.entry === 'review', captured.entry);
 	check('J 只在宿主 serve 命名空间时挂载', JSON.stringify(captured.served) === JSON.stringify(['review']), JSON.stringify(captured.served));
-	check('J 行页与包页两个槽位都占', JSON.stringify(captured.slots) === JSON.stringify(['plugins.row.config', 'plugins.bundle.config']), JSON.stringify(captured.slots));
-	check('J 槽位 key 正确', JSON.stringify(captured.registrations.map((entry) => entry.options.key)) === JSON.stringify(['dsh-review#review', 'dsh-review']), JSON.stringify(captured.registrations.map((entry) => entry.options.key)));
+	check('J 行页、包页与状态条三个槽位都占', JSON.stringify(captured.slots) === JSON.stringify(['plugins.row.config', 'plugins.bundle.config', 'conversation.input.dock']), JSON.stringify(captured.slots));
+	check('J 槽位 key 正确', JSON.stringify(captured.registrations.map((entry) => entry.options.key)) === JSON.stringify(['dsh-review#review', 'dsh-review', undefined]), JSON.stringify(captured.registrations.map((entry) => entry.options.key)));
 	const face = captured.registrations[0].options.inject();
 	check('J inject 提供表单 hook、目录 hook 与写动作', Boolean(face.hooks?.reviewConfigForm) && Boolean(face.hooks?.reviewCatalog) && typeof face.save === 'function' && typeof face.edit === 'function' && typeof face.resetField === 'function', Object.keys(face).join(','));
 	check('J 布尔 spec 认是/否', JSON.stringify(spec('injectPolicy').parse('是')) === JSON.stringify({ kind: 'set', value: true }) && JSON.stringify(spec('injectPolicy').parse('off')) === JSON.stringify({ kind: 'set', value: false }));
@@ -2246,6 +2252,210 @@ console.log('\nL. schema 解析');
 			rmSync(root, { recursive: true, force: true });
 		}
 	}
+}
+
+
+/* ────────────────────────────── M. 评审状态投影 ────────────────────────────── */
+
+console.log('\nM. 评审状态投影');
+{
+	const statusMod = await import(new URL('./lib/status.js', import.meta.url).href);
+	const { applyReviewStatus, createReviewStatusProjection, createReviewStatusState, normalizeReviewStatusState, parseReviewLabel, reviewStatusProjection, reviewStatusView } = statusMod;
+
+	const parsedUncommitted = parseReviewLabel('review(codex,deep) --uncommitted');
+	check('M 解析未提交范围的评审者', JSON.stringify(parsedUncommitted.reviewers) === JSON.stringify(['codex', 'deep']) && parsedUncommitted.scope === 'uncommitted', JSON.stringify(parsedUncommitted));
+	const parsedBase = parseReviewLabel('review(deep-dive) --base main +instructions「只看并发」');
+	check('M 解析相对分支范围', parsedBase.scope === 'base' && parsedBase.scopeRef === 'main' && parsedBase.reviewers[0] === 'deep-dive', JSON.stringify(parsedBase));
+	const parsedCommit = parseReviewLabel('review(codex) --commit abc1234');
+	check('M 解析提交范围', parsedCommit.scope === 'commit' && parsedCommit.scopeRef === 'abc1234', JSON.stringify(parsedCommit));
+	const parsedBad = parseReviewLabel('not-a-review-label');
+	check('M 认不出的 label 降级为未知范围', parsedBad.scope === 'unknown' && parsedBad.reviewers.length === 0, JSON.stringify(parsedBad));
+
+	const now = Date.now();
+	const event = (type, data, time = now) => ({ type, time, data });
+	let state = createReviewStatusState();
+	check('M 空状态', state.rounds === 0 && state.running === 0 && state.runs.length === 0 && state.reviewers.length === 0);
+
+	state = applyReviewStatus(state, event('job/registered', { jobId: 'job-1', kind: 'review', label: 'review(codex,deep) --uncommitted', startedAt: now }));
+	let view = reviewStatusView(state);
+	check('M 注册一轮 → 轮数与运行数', view.rounds === 1 && view.running === 1 && view.runs.length === 1, JSON.stringify(view));
+	check('M 注册一轮 → 评审者从 label 解析', JSON.stringify(view.reviewers) === JSON.stringify(['codex', 'deep']), JSON.stringify(view.reviewers));
+	check('M wire 不暴露 active', !Object.hasOwn(reviewStatusProjection.wire.view(state), 'active'));
+
+	const unrelated = state;
+	state = applyReviewStatus(state, event('assistant/message', { turn: 1 }));
+	check('M 无关事件返回同一个状态引用', state === unrelated);
+
+	state = applyReviewStatus(state, event('job/settled', { jobId: 'job-1', kind: 'review', status: 'completed', detail: '2/2 个评审者完成', startedAt: now, finishedAt: now + 5_000 }, now + 5_000));
+	view = reviewStatusView(state);
+	check('M 结算 → 运行数归零、状态回填', view.running === 0 && view.runs[0].status === 'completed' && view.runs[0].detail === '2/2 个评审者完成', JSON.stringify(view.runs[0]));
+
+	state = applyReviewStatus(state, event('job/registered', { jobId: 'job-2', kind: 'review', label: 'review(deep-dive) --base main', startedAt: now + 6_000 }, now + 6_000));
+	state = applyReviewStatus(state, event('job/settled', { jobId: 'job-2', kind: 'review', status: 'failed', startedAt: now + 6_000, finishedAt: now + 7_000 }, now + 7_000));
+	view = reviewStatusView(state);
+	check('M 两轮后轮数与评审者并集', view.rounds === 2 && JSON.stringify(view.reviewers) === JSON.stringify(['codex', 'deep', 'deep-dive']), JSON.stringify(view));
+	check('M 失败轮次保留原因', view.runs[1].status === 'failed', JSON.stringify(view.runs[1]));
+
+	// workspace-changes：只记录事件/轮次，客户端据此判断「这一轮有没有改动」。
+	state = applyReviewStatus(state, event('turn/start', { turn: 1 }));
+	state = applyReviewStatus(state, event('workspace/changes', { turn: 1 }));
+	state = applyReviewStatus(state, event('turn/end', { turn: 1 }));
+	view = reviewStatusView(state);
+	check('M 折入 turn 与改动轮次', view.changes.enabled === true && view.changes.currentTurn === 1 && view.changes.inTurn === false && view.changes.changesTurn === 1, JSON.stringify(view.changes));
+	state = applyReviewStatus(state, event('turn/start', { turn: 2 }));
+	check('M 新一轮进行中', reviewStatusView(state).changes.inTurn === true);
+	state = applyReviewStatus(state, event('turn/end', { turn: 2 }));
+	const noChangeView = reviewStatusView(state);
+	check('M 无改动轮次不推进改动轮次', noChangeView.changes.currentTurn === 2 && noChangeView.changes.changesTurn === 1, JSON.stringify(noChangeView.changes));
+	const noTrack = createReviewStatusProjection({ trackWorkspaceChanges: false });
+	check('M 没有 workspaceChanges 能力时标记关闭', noTrack.init().changesEnabled === false);
+	// projection 的 state 会被 structuredClone 后按「无损 JSON」校验；任何 undefined / NaN
+	// 都会让 checkpoint 写入直接失败，所以这里把整份状态扫一遍。
+	const badJson = (value, path = 'state') => {
+		if (value === undefined) return path;
+		if (typeof value === 'number' && (!Number.isFinite(value) || Object.is(value, -0))) return path;
+		if (value === null || typeof value !== 'object') return '';
+		if (Array.isArray(value)) {
+			for (let index = 0; index < value.length; index += 1) {
+				const found = badJson(value[index], `${path}[${index}]`);
+				if (found.length > 0) return found;
+			}
+			return '';
+		}
+		for (const [key, child] of Object.entries(value)) {
+			const found = badJson(child, `${path}.${key}`);
+			if (found.length > 0) return found;
+		}
+		return '';
+	};
+	const detached = structuredClone(state);
+	check('M 状态是无损 JSON（可写入 projection cache）', badJson(detached) === '', badJson(detached));
+	check('M fold 保留 bootId', state.bootId === createReviewStatusState().bootId, String(state.bootId));
+
+	// 上一进程遗留的 running：视图改判 interrupted，且不显示「还在跑」。
+	const stale = {
+		...createReviewStatusState(),
+		rounds: 1,
+		running: 1,
+		runs: [{ id: 'old', round: 1, label: 'review(codex) --uncommitted', reviewers: ['codex'], scope: 'uncommitted', scopeRef: '', startedAt: 1_000, finishedAt: undefined, status: 'running', detail: undefined }],
+		reviewers: ['codex'],
+		active: { old: true },
+	};
+	const staleView = reviewStatusView(stale);
+	check('M 旧进程遗留 running 改判中断', staleView.running === 0 && staleView.runs[0].status === 'interrupted', JSON.stringify(staleView));
+	const oldCompleted = { ...stale, running: 0, runs: [{ ...stale.runs[0], status: 'completed', finishedAt: 2_000 }], active: {} };
+	check('M 旧进程已完成的轮次不被改判', reviewStatusView(oldCompleted).runs[0].status === 'completed');
+
+	const cached = { ...stale, bootId: 'previous-process' };
+	const normalized = normalizeReviewStatusState(cached);
+	check('M 旧 bootId 的缓存清掉运行态', normalized.running === 0 && normalized.runs[0].status === 'interrupted' && normalized.active.old === undefined, JSON.stringify(normalized));
+	const parsedCache = reviewStatusProjection.stateSchema.parse(cached);
+	check('M stateSchema 回读同样清运行态', parsedCache.running === 0 && parsedCache.runs[0].status === 'interrupted');
+
+	// runs 有上限，rounds 不受影响。
+	let capped = createReviewStatusState();
+	for (let index = 0; index < 35; index += 1) {
+		const startedAt = now + index * 10;
+		capped = applyReviewStatus(capped, event('job/registered', { jobId: `job-${index}`, kind: 'review', label: 'review(codex) --uncommitted', startedAt }, startedAt));
+		capped = applyReviewStatus(capped, event('job/settled', { jobId: `job-${index}`, kind: 'review', status: 'completed', startedAt, finishedAt: startedAt + 5 }, startedAt + 5));
+	}
+	const cappedView = reviewStatusView(capped);
+	check('M 35 轮后 rounds 仍为 35', cappedView.rounds === 35, String(cappedView.rounds));
+	check('M runs 只保留最近 30 轮', cappedView.runs.length === 30, String(cappedView.runs.length));
+	check('M 保留的是最近的轮次', cappedView.runs[cappedView.runs.length - 1].round === 35, String(cappedView.runs[cappedView.runs.length - 1].round));
+
+	// 宿主 apply 真的把投影注册到 sessionProjections（不是只导出定义）。
+	const registered = [];
+	await loadPlugin({ services: { sessionProjections: { register(definition) { registered.push(definition); return () => {}; } } } });
+	check('M 插件注册状态投影', registered.length === 1 && registered[0].key === 'dsh-review/status' && typeof registered[0].wire?.view === 'function', JSON.stringify(registered.map((definition) => definition.key)));
+	const registeredWithChanges = [];
+	await loadPlugin({ services: { sessionProjections: { register(definition) { registeredWithChanges.push(definition); return () => {}; } }, workspaceChanges: { summary: () => undefined, diff: async () => undefined } } });
+	check('M 有 workspaceChanges 时开启改动检测', registeredWithChanges.length === 1 && registeredWithChanges[0].init().changesEnabled === true);
+	await loadPlugin({ services: { sessionProjections: { register(definition) { registered.push(definition); return () => {}; } } } });
+	check('M 没有 workspaceChanges 时关闭改动检测', registered[registered.length - 1].init().changesEnabled === false);
+}
+
+/* ────────────────────────────── N. 评审状态条 ────────────────────────────── */
+
+console.log('\nN. 评审状态条');
+{
+	const bundle = await loadClientBundle();
+	bundle.mod.apply(bundle.ctx);
+	const { mod, captured } = bundle;
+	const I = mod.__internals;
+	const t = (key) => captured.locales[0].dictionaries.zh[key] ?? key;
+
+	check('N 状态条 key 与宿主一致', I.REVIEW_STATUS_KEY === 'dsh-review/status');
+	check('N 已注册状态条槽位', captured.slots.includes('conversation.input.dock'));
+
+	const idle = I.reviewStatusSummary({ rounds: 0, running: 0, runs: [], reviewers: [] }, Date.now(), t);
+	check('N 未评审状态的文案', idle.state === 'idle' && idle.text === '尚未评审', JSON.stringify(idle));
+	const progress = I.reviewStatusSummary(
+		{
+			rounds: 2,
+			running: 1,
+			runs: [
+				{ id: 'job-1', round: 1, reviewers: ['codex'], scope: 'uncommitted', scopeRef: '', startedAt: Date.now() - 120_000, status: 'completed', detail: '1/1 个评审者完成' },
+				{ id: 'job-2', round: 2, reviewers: ['codex', 'deep-dive'], scope: 'base', scopeRef: 'main', startedAt: Date.now() - 65_000, status: 'running' },
+			],
+			reviewers: ['codex', 'deep-dive'],
+		},
+		Date.now(),
+		t,
+	);
+	check('N 进行中状态与用时', progress.state === 'running' && progress.text.includes('第 2 轮评审中') && progress.text.includes('相对 main') && progress.meta.includes('1 分'), JSON.stringify(progress));
+	const failed = I.reviewStatusSummary(
+		{ rounds: 2, running: 0, runs: [{ id: 'job-2', round: 2, reviewers: ['codex'], scope: 'base', scopeRef: 'main', startedAt: Date.now() - 5_000, status: 'failed' }], reviewers: ['codex'] },
+		Date.now(),
+		t,
+	);
+	check('N 最近一轮失败', failed.state === 'failed' && failed.text === '第 2 轮失败 · 相对 main', JSON.stringify(failed));
+	check('N 时长格式', I.formatReviewDuration(65_000, t) === '1 分 05 秒' && I.formatReviewDuration(9_000, t) === '9 秒', I.formatReviewDuration(65_000, t));
+
+	const chips = I.reviewReviewerChips(['codex', 'deep-dive', 'claude', 'gemini'], t);
+	check('N 评审者胶囊最多 2 个', chips.shown.length === 2 && chips.more === '+2' && chips.title.includes('gemini'), JSON.stringify(chips));
+
+	const session = { blank: false, pendingSubmissions: [], running: false };
+	const status = {
+		rounds: 2,
+		running: 0,
+		reviewers: ['codex', 'deep-dive'],
+		runs: [
+			{ id: 'job-1', round: 1, reviewers: ['codex'], scope: 'uncommitted', scopeRef: '', startedAt: Date.now() - 120_000, finishedAt: Date.now() - 60_000, status: 'completed', detail: '1/1 个评审者完成' },
+			{ id: 'job-2', round: 2, reviewers: ['deep-dive'], scope: 'base', scopeRef: 'main', startedAt: Date.now() - 5_000, finishedAt: Date.now() - 1_000, status: 'failed', detail: '0/1 个评审者完成' },
+		],
+	};
+	const rendered = renderTree(I.ReviewStatusDock({ session, useProjection: () => status, t }));
+	const details = rendered.find((node) => node.props?.className === 'dsh-review-status');
+	check('N 渲染 details 状态', details?.props?.['data-state'] === 'failed', JSON.stringify(details?.props?.['data-state']));
+	check('N 状态条文案', rendered.some((node) => node.props?.className === 'dsh-review-status-text' && node.props?.children === '第 2 轮失败 · 相对 main'));
+	check('N 评审者胶囊', rendered.filter((node) => node.props?.className === 'dsh-review-status-reviewer').length === 2);
+	check('N 简单状态点使用 warning', rendered.some((node) => node.type === 'StateDot' && node.props?.state === 'warning'));
+	check('N 展开面板含两轮历史', rendered.filter((node) => node.props?.className === 'dsh-review-status-run').length === 2);
+	check('N 面板按最近一轮在前', rendered.find((node) => node.props?.className === 'dsh-review-status-run-round')?.props?.children === '#2');
+	check('N 面板范围文案', rendered.some((node) => typeof node.props?.children === 'string' && node.props.children.includes('相对 main')));
+
+	const idleRendered = renderTree(I.ReviewStatusDock({ session, useProjection: () => ({ rounds: 0, running: 0, runs: [], reviewers: [] }), t }));
+	check('N 未评审时显示空面板提示', idleRendered.some((node) => node.props?.className === 'dsh-review-status-empty' && typeof node.props?.children === 'string' && node.props.children.includes('还没有评审记录')));
+	check('N projection 缺失时静默', I.ReviewStatusDock({ session, useProjection: () => undefined, t }) === null);
+
+	// 空对话 / 本轮无改动时的隐藏规则。
+	const emptySession = { blank: true, pendingSubmissions: [], running: false };
+	check('N 空对话隐藏', I.reviewStatusVisible(emptySession, status) === false);
+	check('N 首条消息待发时显示', I.reviewStatusVisible({ ...emptySession, pendingSubmissions: [{}] }, status) === true);
+	check('N 已尝试发送但队列为空时仍显示', I.reviewStatusVisible({ ...emptySession, promptAttempted: true }, status) === true);
+	check('N 空对话但在跑时显示', I.reviewStatusVisible({ ...emptySession, running: true }, status) === true);
+	check('N 空对话不渲染', I.ReviewStatusDock({ session: emptySession, useProjection: () => status, t }) === null);
+
+	const noChanges = { ...status, running: 0, changes: { enabled: true, currentTurn: 3, inTurn: false, changesTurn: 2 } };
+	check('N 本轮无改动隐藏', I.reviewStatusVisible(session, noChanges) === false);
+	check('N 本轮无改动不渲染', I.ReviewStatusDock({ session, useProjection: () => noChanges, t }) === null);
+	check('N 本轮有改动显示', I.reviewStatusVisible(session, { ...noChanges, changes: { ...noChanges.changes, changesTurn: 3 } }) === true);
+	check('N 轮次进行中显示', I.reviewStatusVisible(session, { ...noChanges, changes: { ...noChanges.changes, inTurn: true } }) === true);
+	check('N 评审运行中覆盖无改动', I.reviewStatusVisible(session, { ...noChanges, running: 1 }) === true);
+	check('N 会话运行中覆盖无改动', I.reviewStatusVisible({ ...session, running: true }, noChanges) === true);
+	check('N 没有改动能力时不按改动隐藏', I.reviewStatusVisible(session, { ...noChanges, changes: { ...noChanges.changes, enabled: false } }) === true);
+	check('N 还没有 turn 时显示', I.reviewStatusVisible(session, { ...noChanges, changes: { enabled: true, currentTurn: 0, inTurn: false, changesTurn: 0 } }) === true);
 }
 
 console.log(`\n${passes} 项通过，${failures} 项失败`);

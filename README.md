@@ -9,7 +9,7 @@
 Code review as a tool, not a single vendor. Hand your diff to a CLI coding agent, or to a
 subagent running a model from your DSH configuration — then read one merged report.
 
-![The configuration page](docs/images/gui-en.png)
+![Review status and per-round history between the conversation and the composer](docs/images/gui-en.png)
 
 ## What it gives you
 
@@ -24,6 +24,11 @@ subagent running a model from your DSH configuration — then read one merged re
   stays collapsed under advanced settings. Edits are written about half a second after you stop
   typing — a status line at the top says where they stand, and a **Save now** button remains as a
   manual retry.
+- **Review status, at a glance.** Once there is a conversation, a slim line between it and the
+  composer says whether this session has reviewed, which round is running, how many rounds
+  finished, and who reviewed. Expand it for each round's time, scope, and outcome. It stays
+  hidden while the conversation is empty or when the current turn changed no files. The data is
+  session-scoped and persists across reloads.
 - **No keys, no endpoints.** Providers and credentials stay in your DSH config — this plugin
   only asks for what is already there.
 
@@ -60,6 +65,39 @@ settles.
 
 Reviewers are opt-in: if nothing is enabled, a call with no `reviewers` fails and says so
 rather than quietly running everything.
+
+## Review status
+
+A slim status line sits between the conversation and the composer, no panel required:
+
+| State | What it shows |
+| --- | --- |
+| Nothing reviewed | `Review · Not reviewed yet` |
+| Running | `Review · Round 2 in progress · 1m 05s` + the running reviewers |
+| Finished | `Review · 3 round(s) reviewed` + reviewer chips |
+| Last round failed/interrupted | `Review · Round 3 failed` / `Round 3 interrupted` |
+
+Click the line for the last 30 rounds: round number, time, scope (uncommitted changes / a base
+branch / a commit), reviewers, and outcome. The round count is not limited by the 30-row history.
+
+The data is a session projection: each `review` job writes once on registration and once on
+settlement, and the value is checkpointed with the session. Switching sessions, reloading, or
+restarting the host keeps the history. A round left running by a previous host process is shown
+as `interrupted` instead of ticking forever.
+
+**When it stays hidden:**
+
+- The conversation is still empty — no messages and no first turn in flight.
+- The current turn changed no files. This reuses the official
+  [`@deepseek-ai/dsh-workspace-changes`](https://github.com/deepseek-ai/deepseek-harness) plugin:
+  its `workspace/changes` event is normally only appended for a turn that actually changed files, so the
+  status line does not run its own `git status`. It remains visible while a turn is in progress
+  or a review is running, so triggering a review does not make it vanish.
+- If the host does not mount `workspace-changes`, only the empty-conversation rule applies; a
+  missing capability never hides the line.
+- It only looks at file changes made during the turn. Manual edits, or shell edits outside the
+  upstream plugin's snapshot coverage, are not counted — that boundary belongs to
+  `workspace-changes`, not to a second heuristic here.
 
 ## Reviewers
 

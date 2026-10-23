@@ -30,6 +30,7 @@ import { composeReport, truncateText } from './lib/report.js';
 import { checkCliVersion, clampForArgv, probeCliReviewer, reviewerEnv, runReviewer } from './lib/reviewers.js';
 import { Config, schemaAvailable, schemaSource, unwrapConfig } from './lib/schema.js';
 import { modePrompt, needsPacket, resolveMode, resolveSettings, selectReviewers } from './lib/settings.js';
+import { createReviewStatusProjection } from './lib/status.js';
 
 /** 加载器诊断用的插件名；`cordis.patch.yml` 里的 id 是 `review`。 */
 export const name = 'review';
@@ -44,8 +45,14 @@ export { Config };
 /** 仅供自测：把心跳间隔调小，避免用例等 30 秒。 */
 export const __internals = { heartbeatMs: 30_000 };
 
-/** 硬依赖：缺任何一个都说明这套组合跑不了这个工具，直接不激活而不是半残。 */
-export const inject = ['tools', 'subprocess', 'jobs'];
+/**
+ * 硬依赖：缺任何一个都说明这套组合跑不了这个工具，直接不激活而不是半残。
+ *
+ * `sessionProjections` 是对话与输入框之间「评审状态」的数据源：host 把 review job 的生命周期
+ * 折成一份随会话持久化的快照，client 只读整值。它由 DSH base 提供（0.2.1 起），
+ * 和 tools / jobs 同属运行这套插件的前提。
+ */
+export const inject = ['tools', 'subprocess', 'jobs', 'sessionProjections'];
 
 const OUTPUT_SCHEMA = {
 	type: 'object',
@@ -235,6 +242,12 @@ async function buildDoctorReport(ctx, settings, cwd) {
 		schemaAvailable
 			? `- GUI 配置表单：✅ 已加载 Config schema（schemastery：\`${schemaSource ?? '插件依赖'}\`）`
 			: '- GUI 配置表单：❌ 找不到 `@deepseek-ai/schemastery`，GUI 不会显示配置表单（配置请改 profile 的 cordis.patch.yml，或把依赖装进 profile）',
+		typeof ctx.get === 'function' && ctx.get('sessionProjections') !== undefined
+			? '- 评审状态条：✅ `sessionProjections` 已注册，对话与输入框之间会显示轮次与评审者'
+			: '- 评审状态条：❌ 宿主没有 `sessionProjections`，对话与输入框之间不会显示状态条（工具本身仍可用）',
+		typeof ctx.get === 'function' && ctx.get('workspaceChanges') !== undefined
+			? '- 改动检测：✅ `workspaceChanges` 已注册，当前轮没有文件改动时会自动隐藏状态条'
+			: '- 改动检测：⚠️ 宿主没有 `workspaceChanges`，状态条只在对话非空时显示（不会按改动隐藏）',
 	];
 
 	if (enabled.length === 0) {
@@ -421,6 +434,10 @@ export function apply(ctx, config) {
 				kind: 'review',
 				label,
 				...(owner === undefined ? {} : { owner }),
+				// 把 job 关联回发起它的工具调用：job 卡片、评审状态投影都能据此对齐同一次调用。
+				...(typeof exec.callId === 'string'
+					? { toolCall: { callId: exec.callId, rootCallId: exec.rootCallId ?? exec.callId } }
+					: {}),
 				run: (job) => {
 					const controller = new AbortController();
 					// 结构化记录这次 job 是「撞了墙钟上限」还是「被取消」：评审者据此区分超时与
@@ -624,6 +641,29 @@ export function apply(ctx, config) {
 
 	// 可选：把模式的 when 策略写进系统提示词。默认关闭 —— 插件不替用户做约束。
 	const disposers = [disposeTool];
+
+	// 评审状态投影：review job 的注册 / 结算事件 → 客户端对话与输入框之间的状态条。
+	// `sessionProjections` 已在 inject 里声明为硬依赖；这里用 get 取实例，拿不到说明宿主
+	// 不满足 engines，doctor 会把这一项报出来。
+	const projections = typeof ctx.get === 'function' ? ctx.get('sessionProjections') : undefined;
+	if (projections !== undefined && projections !== null && typeof projections.register === 'function') {
+		let trackWorkspaceChanges = typeof ctx.get === 'function' && ctx.get('workspaceChanges') !== undefined;
+		// workspaceChanges 是可选能力，可能比本插件晚注册；动态依赖回调把它翻成 true。
+		if (typeof ctx.inject === 'function') {
+			try {
+				const disposeInject = ctx.inject(['workspaceChanges'], () => {
+					trackWorkspaceChanges = true;
+					return () => {
+						trackWorkspaceChanges = false;
+					};
+				});
+				if (typeof disposeInject === 'function') disposers.push(disposeInject);
+			} catch {
+				/* 宿主不支持动态依赖时按 apply 时的探测结果 */
+			}
+		}
+		disposers.push(projections.register(createReviewStatusProjection({ trackWorkspaceChanges: () => trackWorkspaceChanges })));
+	}
 	// 评审策略段落**始终注册**，但正文用函数按当前配置现算：
 	// `injectPolicy` 与模式的 when 都是 GUI 可改的 volatile 字段，注册时算一次会立刻过期
 	// （打开注入不生效、关掉还留着旧文本）。返回空串时渲染器会丢掉这一节，所以「不注入」
