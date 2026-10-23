@@ -77,8 +77,9 @@ A slim status line sits between the conversation and the composer, no panel requ
 | Finished | `Review · 3 round(s) reviewed` + reviewer chips |
 | Last round failed/interrupted | `Review · Round 3 failed` / `Round 3 interrupted` |
 
-Click the line for the last 30 rounds: round number, time, scope (uncommitted changes / a base
-branch / a commit), reviewers, and outcome. The round count is not limited by the 30-row history.
+Click the line for the last 30 finished rounds (plus any still running): round number, time,
+scope (uncommitted changes / a base branch / a commit), reviewers, and outcome. The round count
+is not limited by the retained history.
 
 The data is a session projection: each `review` job writes once on registration and once on
 settlement, and the value is checkpointed with the session. Switching sessions, reloading, or
@@ -94,7 +95,8 @@ as `interrupted` instead of ticking forever.
   status line does not run its own `git status`. It remains visible while a turn is in progress
   or a review is running, so triggering a review does not make it vanish.
 - If the host does not mount `workspace-changes`, only the empty-conversation rule applies; a
-  missing capability never hides the line.
+  missing capability never hides the line. Subagent sessions are exempt from the no-change rule
+  too, because the upstream plugin deliberately does not record them.
 - It only looks at file changes made during the turn. Manual edits, or shell edits outside the
   upstream plugin's snapshot coverage, are not counted — that boundary belongs to
   `workspace-changes`, not to a second heuristic here.

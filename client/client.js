@@ -620,6 +620,8 @@ window.__ModuleLoader__.load({
 			if (status === null || typeof status !== 'object') return false;
 			// 首轮 turn/start 之前 agent 就可能已经在改文件；运行中就展示，别等 turn 事件。
 			if (session.running === true) return true;
+			// workspace-changes 明确不记录 subagent 会话；拿它的「无改动」判断会误藏。
+			if (session.subagent !== null && session.subagent !== undefined) return true;
 
 			const running = Number.isSafeInteger(status.running) ? status.running : 0;
 			if (running > 0) return true;

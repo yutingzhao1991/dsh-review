@@ -2349,8 +2349,30 @@ console.log('\nM. 评审状态投影');
 	const cached = { ...stale, bootId: 'previous-process' };
 	const normalized = normalizeReviewStatusState(cached);
 	check('M 旧 bootId 的缓存清掉运行态', normalized.running === 0 && normalized.runs[0].status === 'interrupted' && normalized.active.old === undefined, JSON.stringify(normalized));
+	// 同进程恢复 + 超过 30 个并发评审：最早的仍在 running，不能被裁剪掉。
+	const many = createReviewStatusState();
+	many.runs = Array.from({ length: 31 }, (_, index) => ({
+		id: `job-${index}`,
+		round: index + 1,
+		label: 'review(codex) --uncommitted',
+		reviewers: ['codex'],
+		scope: 'uncommitted',
+		scopeRef: '',
+		startedAt: now + index,
+		status: index === 0 ? 'running' : 'completed',
+	}));
+	many.running = 1;
+	many.active = { 'job-0': true };
+	many.reviewers = ['codex'];
+	many.rounds = 31;
+	const manyNormalized = normalizeReviewStatusState(many);
+	check('M 超 30 并发时保留 running', manyNormalized.runs.some((run) => run.id === 'job-0' && run.status === 'running') && reviewStatusView(manyNormalized).running === 1, JSON.stringify(manyNormalized.runs.map((run) => `${run.id}:${run.status}`)));
 	const parsedCache = reviewStatusProjection.stateSchema.parse(cached);
 	check('M stateSchema 回读同样清运行态', parsedCache.running === 0 && parsedCache.runs[0].status === 'interrupted');
+	// 缓存落后于日志：checkpoint 停在 running，settlement 已写进日志；重放必须能回填。
+	const replayed = applyReviewStatus(parsedCache, event('job/settled', { jobId: 'old', kind: 'review', status: 'completed', detail: '1/1 个评审者完成', finishedAt: 2_000 }, 2_000));
+	const replayedView = reviewStatusView(replayed);
+	check('M 缓存恢复后的 settlement 能回填', replayedView.runs[0].status === 'completed' && replayedView.running === 0 && replayed.active.old === undefined, JSON.stringify(replayedView.runs[0]));
 
 	// runs 有上限，rounds 不受影响。
 	let capped = createReviewStatusState();
@@ -2454,6 +2476,7 @@ console.log('\nN. 评审状态条');
 	check('N 轮次进行中显示', I.reviewStatusVisible(session, { ...noChanges, changes: { ...noChanges.changes, inTurn: true } }) === true);
 	check('N 评审运行中覆盖无改动', I.reviewStatusVisible(session, { ...noChanges, running: 1 }) === true);
 	check('N 会话运行中覆盖无改动', I.reviewStatusVisible({ ...session, running: true }, noChanges) === true);
+	check('N 子智能体会话不按改动隐藏', I.reviewStatusVisible({ ...session, subagent: { address: { kind: 'subagent' } } }, noChanges) === true);
 	check('N 没有改动能力时不按改动隐藏', I.reviewStatusVisible(session, { ...noChanges, changes: { ...noChanges.changes, enabled: false } }) === true);
 	check('N 还没有 turn 时显示', I.reviewStatusVisible(session, { ...noChanges, changes: { enabled: true, currentTurn: 0, inTurn: false, changesTurn: 0 } }) === true);
 }
