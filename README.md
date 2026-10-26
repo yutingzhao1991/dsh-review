@@ -21,9 +21,9 @@ subagent running a model from your DSH configuration — then read one merged re
 - **Review modes.** Name a strength and a prompt once (`quick`, `balanced`, `deep`, …) and reuse
   it, instead of retyping review instructions every time.
 - **Configured in the GUI, and saved for you.** Tick the reviewers you want; everything else
-  stays collapsed under advanced settings. Edits are written about half a second after you stop
-  typing — a status line at the top says where they stand, and a **Save now** button remains as a
-  manual retry.
+  stays collapsed under advanced settings. Edits are written about a second and a half after you
+  stop typing — a status line at the top says where they stand, and a **Save now** button remains
+  as a manual retry.
 - **Review status, at a glance.** Once there is a conversation, a slim line between it and the
   composer says whether this session has reviewed, which round is running, how many rounds
   finished, and who reviewed. Expand it for each round's time, scope, and outcome. It stays
@@ -57,6 +57,7 @@ review({ mode: "deep" })                          // deep strength, several revi
 review({ base: "main" })                          // working tree vs a branch
 review({ commit: "abc1234" })                     // one commit
 review({ instructions: "only concurrency and error handling" })
+review({ timeoutMs: 600000 })                     // this call may run for 10 minutes
 ```
 
 Reviewing takes minutes, so the call waits a little and then hands back a job id: read the
@@ -64,7 +65,9 @@ result with `job_output`, stop it with `job_kill`, or just wait — you are noti
 settles.
 
 Reviewers are opt-in: if nothing is enabled, a call with no `reviewers` fails and says so
-rather than quietly running everything.
+rather than quietly running everything. `timeoutMs` caps a single call; it is combined with the
+configured `hardTimeoutMs` by taking the smaller value, and the report attributes the timeout to
+the limit that actually fired.
 
 ## Review status
 
@@ -151,6 +154,31 @@ ignored with a migration warning instead of silently doing nothing.
 
 There is deliberately no "send the diff to a bare model" kind: a reviewer that can open the
 repository itself is worth more than one that only sees what it was handed.
+
+### Let codex accept scope + focus
+
+codex's native `exec review` treats the range flags and PROMPT as mutually exclusive, so the
+default codex reviewer has to choose one. If you really need to review a committed range with a
+focus, add a second reviewer that runs `codex exec` — it gets the diff packet and the
+`instructions` are delivered in the prompt:
+
+```yaml
+reviewers:
+  - id: codex-diff
+    kind: cli
+    preset: custom
+    executable: codex
+    label: Codex (diff)
+    command: ["{exe}", "exec", "--sandbox", "read-only", "{model}", "{extra}", "{prompt}"]
+    promptVia: argv
+    needsPacket: true
+    promptReplacesRange: false
+```
+
+This is `codex exec`, not the native `exec review`; the review behavior is not identical, so use it
+only when you need scope + focus. Do not put `{promptArg}` in `command` (the plugin would treat
+PROMPT and range as mutually exclusive), and do not put `{range}` there (`codex exec` does not
+understand `--base` / `--commit`; the diff packet carries the range).
 
 ```yaml
 - id: review
@@ -243,6 +271,12 @@ knowing:
   reviewers' own instructions.
 - Truncated reports stay in `$TMPDIR/dsh-review-*/report.md`; other runs clean up after
   themselves.
+- Merge commits are reviewed as the **first-parent** diff (`git show -m --first-parent`): that is
+  what the merge brought onto the current branch, not a combined diff.
+- Untracked symbolic links are not followed, so a link cannot pull content from outside the
+  repository into the reviewer; the report lists the names and says they were skipped.
+- The "changed files preview" in the report header comes from Git's file list; it describes the
+  scope, not proof that a reviewer inspected every file.
 - The reviewer list in the tool description is a **registration-time snapshot**: the host does not
   reload plugin code when the profile's dependencies change (measured: `patchReload: live` only
   reloads the patch layer), so the description can lag behind disk. Use

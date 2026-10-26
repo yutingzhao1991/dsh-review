@@ -43,7 +43,7 @@ export const name = 'review';
 export { Config };
 
 /** 仅供自测：把心跳间隔调小，避免用例等 30 秒。 */
-export const __internals = { heartbeatMs: 30_000 };
+export const __internals = { heartbeatMs: 30_000, writeReport: writeFile };
 
 /**
  * 硬依赖：缺任何一个都说明这套组合跑不了这个工具，直接不激活而不是半残。
@@ -107,9 +107,11 @@ function buildToolDescription(settings) {
 	const lines = ['用外部评审者评审代码改动，返回它们的评审结论（findings、风险、建议）。', ''];
 
 	const enabled = settings.reviewers.filter((reviewer) => reviewer.enabled);
-	lines.push('可用评审者：');
+	// 这份描述是注册时生成的；宿主不会因为 patch 变化重载插件代码，所以必须把
+	// “快照”写在清单旁边——否则模型会把“当时没有”当成“现在没有”，直接跳过评审。
+	lines.push('可用评审者（**注册时快照**；配置改动后可能过期，准确清单以 `review({ doctor: true })` 为准）：');
 	if (enabled.length === 0) {
-		lines.push('- （没有配置任何评审者：请先在插件 config 里配置 agents / reviewers，即 CLI 智能体或子智能体）');
+		lines.push('- （快照里没有启用的评审者。这不等于现在没有——先跑 `review({ doctor: true })` 确认，再决定是否跳过评审。）');
 	} else {
 		for (const reviewer of enabled) {
 			const target = reviewer.kind === 'cli' ? `可执行 ${reviewer.executable}` : `子智能体 ${reviewer.provider}`;
@@ -138,7 +140,7 @@ function buildToolDescription(settings) {
 		schemaAvailable ? '配置也可以在 GUI 里改：侧边栏 Plugins → dsh-review 的行/包页面（解析与保存都由宿主负责）。' : 'GUI 表单在本部署不可用（找不到 @deepseek-ai/schemastery），配置请改 profile 的 cordis.patch.yml。',
 		'不传参数时评审工作区里 staged / unstaged / untracked 的全部改动。',
 		'参数规则：`base` 与 `commit` **互斥**，只能给一个。`base`/`commit` 可以和 `instructions` 同时给——只要选中的评审者里有能同时收「范围 + 关注点」的（subagent 类都可以）；全是「PROMPT 与范围开关互斥」的 CLI 时会被直接拒绝（二者只能留一个，或加一个 subagent 评审者；写进 `mode` 的提示词同样会被跳过）。同时给时，收不了 instructions 的评审者只收范围（范围优先），报告脚注会点名是谁没收到。',
-		'`reviewers` 只能从上面列出的评审者里选，写别的 id 会直接报错（插件没有「按需指名模型」这条路）。',
+		'`reviewers` 只能从运行期启用的评审者里选，写别的 id 会直接报错（插件没有「按需指名模型」这条路）；上面清单只是注册时快照。',
 		'单次评审不一定穷尽（同一份改动，各评审者可能各有遗漏）：要覆盖度就用 `mode` 的深度模式，或者一次多选几个评审者。',
 		'评审通常要跑几分钟：默认**立即**返回 job id（不等待），用 job_output 读结果，跑完会自动通知；调用方可自行决定什么时候放弃。',
 		'评审者要是总是失败（换了机器、重装过依赖），先用 `doctor: true` 做一次环境自检（不评审任何改动）。',
@@ -162,7 +164,7 @@ function buildParameters(settings) {
 			reviewers: {
 				type: 'array',
 				items: { type: 'string' },
-				description: `要使用的评审者 id，只能从这些里选：${enabled.map((reviewer) => reviewer.id).join(', ') || '（当前没有启用的评审者）'}。${reviewersHint}`,
+				description: `要使用的评审者 id。注册时快照里启用的有：${enabled.map((reviewer) => reviewer.id).join(', ') || '（当时没有启用的评审者）'}；运行期可能已变，准确清单以 \`doctor: true\` 为准，传错会立刻报错并列出可用项。${reviewersHint}`,
 			},
 			mode: { type: 'string', description: `评审模式（强度、提示词、评审者集合）。${modeHint}` },
 			base: { type: 'string', description: '评审当前工作区相对该分支的改动（如 "main"）。与 commit 互斥，只能给一个；可以和 instructions 同时给（前提见工具描述：需要选中的评审者里有能同时收范围与关注点的）。' },
@@ -170,6 +172,10 @@ function buildParameters(settings) {
 			instructions: {
 				type: 'string',
 				description: '附加评审指令，用来聚焦关注点（如「只看并发与错误处理」）。不传 base/commit 时按未提交的改动评审；传了范围时，只有能同时收「范围 + 关注点」的评审者（subagent 类）会收到它，其余只收范围并在报告脚注里被点名；选中的评审者全是 codex 这类「PROMPT 与范围开关互斥」的 CLI 时会直接报错（范围与 instructions 只能留一个）。',
+			},
+			timeoutMs: {
+				type: 'integer',
+				description: '本次评审的墙钟上限（毫秒，1..86400000）。不传则用配置里的 `hardTimeoutMs`；两者都设时取较小值。超时后报告会按实际生效的上限归因。',
 			},
 			doctor: {
 				type: 'boolean',
@@ -208,6 +214,14 @@ function validateArgs(raw) {
 	if (instructions === '-') throw new Error('instructions 不能是 "-"（那是 codex 的「从 stdin 读」约定，本工具不提供 stdin）。');
 	if (instructions.length > 8000) throw new Error('instructions 过长：最多 8000 字符。');
 
+	let timeoutMs = 0;
+	if (args.timeoutMs !== undefined) {
+		if (!Number.isInteger(args.timeoutMs) || args.timeoutMs <= 0 || args.timeoutMs > 86_400_000) {
+			throw new Error('timeoutMs 必须是 1 到 86400000 之间的整数（毫秒）。');
+		}
+		timeoutMs = args.timeoutMs;
+	}
+
 	let reviewers;
 	if (args.reviewers !== undefined) {
 		if (!Array.isArray(args.reviewers) || args.reviewers.some((entry) => typeof entry !== 'string')) {
@@ -215,10 +229,41 @@ function validateArgs(raw) {
 		}
 		reviewers = args.reviewers;
 	}
-	return { base, commit, instructions, reviewers, mode: typeof args.mode === 'string' ? args.mode : undefined, doctor: args.doctor === true };
+	return { base, commit, instructions, timeoutMs, reviewers, mode: typeof args.mode === 'string' ? args.mode : undefined, doctor: args.doctor === true };
 }
 
 /* ────────────────────────────── 环境自检 ────────────────────────────── */
+
+/**
+ * 描述指纹：覆盖 `buildToolDescription` / `buildParameters` 的输入里会影响文案的字段。
+ *
+ * 只比 reviewer id 不够——默认集合、模式、可执行文件、label、warnings 变了，描述同样
+ * 会过期。指纹只用于 doctor 的“是否一致”判断，不参与执行。
+ */
+function descriptionFingerprint(settings) {
+	return JSON.stringify({
+		reviewers: settings.reviewers
+			.filter((reviewer) => reviewer.enabled)
+			.map((reviewer) => ({
+				id: reviewer.id,
+				kind: reviewer.kind,
+				label: reviewer.label,
+				executable: reviewer.executable ?? null,
+				provider: reviewer.provider ?? null,
+				preset: reviewer.preset ?? null,
+			})),
+		defaultReviewers: settings.defaultReviewers ?? null,
+		defaultMode: settings.defaultMode ?? null,
+		modes: Object.values(settings.modes).map((mode) => ({
+			name: mode.name,
+			label: mode.label,
+			strength: mode.strength,
+			reviewers: mode.reviewers ?? null,
+			description: mode.description ?? null,
+		})),
+		warnings: settings.warnings,
+	});
+}
 
 /**
  * `review({ doctor: true })`：只回答「这套配置现在能不能跑」，不评审任何改动。
@@ -227,7 +272,7 @@ function validateArgs(raw) {
  * 行为不会漂移。CLI 只跑一次 `--version`；子智能体只查 provider 是否注册——**不做模型
  * 连通性测试**（那要真发请求，属于显式动作，这里不代劳）。
  */
-async function buildDoctorReport(ctx, settings, cwd) {
+async function buildDoctorReport(ctx, settings, cwd, registered = settings) {
 	const profile = typeof ctx.get === 'function' ? ctx.get('profileContext') : undefined;
 	const subagents = typeof ctx.get === 'function' ? ctx.get('subagents') : ctx.subagents;
 	const enabled = settings.reviewers.filter((reviewer) => reviewer.enabled);
@@ -249,6 +294,23 @@ async function buildDoctorReport(ctx, settings, cwd) {
 			? '- 改动检测：✅ `workspaceChanges` 已注册，当前轮没有文件改动时会自动隐藏状态条'
 			: '- 改动检测：⚠️ 宿主没有 `workspaceChanges`，状态条只在对话非空时显示（不会按改动隐藏）',
 	];
+
+	// doctor 要能承担“准确清单以我为准”的承诺：不只报数量，还要报当前默认集合/模式。
+	const currentIds = enabled.map((reviewer) => reviewer.id);
+	const registeredIds = registered.reviewers.filter((reviewer) => reviewer.enabled).map((reviewer) => reviewer.id);
+	const sameDescription = descriptionFingerprint(settings) === descriptionFingerprint(registered);
+	lines.push(
+		`- 工具描述快照：${sameDescription ? '✅ 与当前配置一致' : '⚠️ 与当前配置不一致；重启宿主后描述才会更新'}`,
+		`- 当前默认评审者：${settings.defaultReviewers !== undefined && settings.defaultReviewers.length > 0 ? settings.defaultReviewers.map((id) => `\`${id}\``).join('、') : '（未设置，调用时必须显式给 reviewers）'}`,
+		`- 当前默认模式：${settings.defaultMode === undefined ? '（未设置）' : `\`${settings.defaultMode}\``}`,
+		`- 当前模式：${Object.keys(settings.modes).length > 0 ? Object.keys(settings.modes).map((name) => `\`${name}\``).join('、') : '（无）'}`,
+	);
+	if (!sameDescription) {
+		lines.push(
+			`  - 评审者：快照 ${registeredIds.length > 0 ? registeredIds.map((id) => `\`${id}\``).join('、') : '（无）'} → 当前 ${currentIds.length > 0 ? currentIds.map((id) => `\`${id}\``).join('、') : '（无）'}`,
+			`  - 默认集合：快照 ${registered.defaultReviewers === undefined ? '（未设置）' : `\`${registered.defaultReviewers.join(',')}\``} → 当前 ${settings.defaultReviewers === undefined ? '（未设置）' : `\`${settings.defaultReviewers.join(',')}\``}`,
+		);
+	}
 
 	if (enabled.length === 0) {
 		lines.push('', '没有启用任何评审者：请在插件 config 里配置 `reviewers` / `agents`，并把它选进 `defaultReviewers` 或某个模式。');
@@ -309,12 +371,32 @@ async function buildDoctorReport(ctx, settings, cwd) {
 		'',
 		'- 自检不评审任何改动、不起评审者；CLI 只跑一次 `--version`。',
 		'- 子智能体的模型连通性不在自检范围内：那需要真的发一次请求。',
-		'- 工具描述里列出的评审者是**注册时**快照：宿主不会因为 profile 依赖变化而重载插件代码，配置改了以后以 `doctor` 的结果为准。',
+		'- 工具描述与参数是**注册时**快照：宿主不会因为 profile 依赖变化而重载插件代码。上面已列出当前配置；两者不一致时以当前配置为准，重启宿主后描述才会更新。',
 	);
 	return lines.join('\n');
 }
 
 /* ────────────────────────────── 运行时辅助 ────────────────────────────── */
+
+/** 合并多个 AbortSignal；宿主 Node 没有 `AbortSignal.any` 时手工桥接。 */
+function combineAbortSignals(signals) {
+	const list = signals.filter((signal) => signal !== undefined && signal !== null);
+	if (list.length === 0) return new AbortController().signal;
+	if (list.length === 1) return list[0];
+	if (typeof AbortSignal.any === 'function') return AbortSignal.any(list);
+	const controller = new AbortController();
+	const relay = (signal) => {
+		if (!controller.signal.aborted) controller.abort(signal.reason);
+	};
+	for (const signal of list) {
+		if (signal.aborted) {
+			relay(signal);
+			break;
+		}
+		signal.addEventListener('abort', () => relay(signal), { once: true });
+	}
+	return controller.signal;
+}
 
 /** 会话工作目录；拿不到就退回宿主进程 cwd。 */
 function resolveCwd(exec) {
@@ -381,10 +463,20 @@ export function apply(ctx, config) {
 		},
 		presentCall: (args) => {
 			const parsed = isRecord(args) ? args : {};
-			// 与 job 标签共用 describeCall：以前这里是第二份拼装逻辑，job 标签加了
-			// `+instructions` 而卡片标题没加，两边就此发散。
-			const raw = Array.isArray(parsed.reviewers) && parsed.reviewers.length > 0 ? parsed.reviewers : settings.defaultReviewers ?? [];
-			const ids = raw.length > 0 ? raw : ['default'];
+			// 自检不选评审者：配置坏掉时它恰恰最有用，不能因为 selectReviewers 抛错
+			// 让卡片先崩。普通调用也吞掉解析错误，把真正的报错留给 execute。
+			if (parsed.doctor === true) return { card: 'terminal', title: 'review(doctor)' };
+			const live = snapshot();
+			let ids;
+			try {
+				const mode = resolveMode(live, typeof parsed.mode === 'string' ? parsed.mode : undefined);
+				const requested = Array.isArray(parsed.reviewers) && parsed.reviewers.length > 0 ? parsed.reviewers : undefined;
+				ids = selectReviewers(live, mode, requested).map((reviewer) => reviewer.id);
+			} catch {
+				const raw = Array.isArray(parsed.reviewers) && parsed.reviewers.length > 0 ? parsed.reviewers : live.defaultReviewers ?? [];
+				ids = raw.length > 0 ? raw : ['default'];
+			}
+			if (ids.length === 0) ids = ['default'];
 			return {
 				card: 'terminal',
 				title: describeCall(ids.map((id) => ({ id })), {
@@ -403,7 +495,7 @@ export function apply(ctx, config) {
 			assertDirectory(cwd);
 			// 自检要在选评审者之前：配置坏掉（一个都没启用）时它恰恰最有用。
 			if (target.doctor === true) {
-				const report = await buildDoctorReport(ctx, live, cwd);
+				const report = await buildDoctorReport(ctx, live, cwd, settings);
 				return { kind: 'completed', status: 'completed', reviewers: [], report };
 			}
 			// 解析失败就地报错，模型能马上改参数重试。
@@ -422,9 +514,44 @@ export function apply(ctx, config) {
 				);
 			}
 
+			// 调用级预算从范围校验开始计时；否则 git 校验卡住时 timeoutMs 不兑现。
+			const callTimeout = target.timeoutMs;
+			const hardTimeout = live.hardTimeoutMs;
+			let limit;
+			if (callTimeout > 0 && (hardTimeout <= 0 || callTimeout <= hardTimeout)) limit = { source: 'call', ms: callTimeout };
+			else if (hardTimeout > 0) limit = { source: 'hard', ms: hardTimeout };
+			const callController = new AbortController();
+			const jobStops = { timedOut: false, limit };
+			const callSignal = combineAbortSignals([exec.signal, callController.signal]);
+			let timer;
+			if (limit !== undefined) {
+				timer = setTimeout(() => {
+					// 用户先取消时 callSignal 已经 abort；后到的定时器不能把原因改写成超时。
+					if (callSignal.aborted) return;
+					jobStops.timedOut = true;
+					callController.abort(limit.source === 'call' ? `超过本次调用 timeoutMs=${limit.ms}ms` : `超过 ${limit.ms}ms 硬上限`);
+				}, limit.ms);
+				timer.unref?.();
+			}
+
 			// 先确认 base/commit 真的存在：否则会白起一轮评审者，最后报 completed 却什么都没评。
-			const badRevision = await assertRevisionExists(ctx, cwd, target, exec.signal);
-			if (badRevision !== undefined) throw new Error(badRevision);
+			// 这段也受本次调用预算约束。
+			let badRevision;
+			try {
+				badRevision = await assertRevisionExists(ctx, cwd, target, callSignal);
+			} catch (error) {
+				if (timer !== undefined) clearTimeout(timer);
+				throw error;
+			}
+			if (callSignal.aborted) {
+				if (timer !== undefined) clearTimeout(timer);
+				if (jobStops.timedOut) throw new Error(`review 已超时：${String(callSignal.reason ?? '超过本次调用预算')}`);
+				throw new Error(`review 已取消（${String(callSignal.reason ?? 'cancelled')}）`);
+			}
+			if (badRevision !== undefined) {
+				if (timer !== undefined) clearTimeout(timer);
+				throw new Error(badRevision);
+			}
 
 			const workdir = await mkdtemp(join(tmpdir(), 'dsh-review-'));
 			const reportPath = join(workdir, 'report.md');
@@ -439,24 +566,15 @@ export function apply(ctx, config) {
 					? { toolCall: { callId: exec.callId, rootCallId: exec.rootCallId ?? exec.callId } }
 					: {}),
 				run: (job) => {
-					const controller = new AbortController();
-					// 结构化记录这次 job 是「撞了墙钟上限」还是「被取消」：评审者据此区分超时与
-					// 用户取消（两者都会 abort，只看信号分不出来）。
-					const jobStops = { timedOut: false };
-					let timer;
-					if (live.hardTimeoutMs > 0) {
-						timer = setTimeout(() => {
-							jobStops.timedOut = true;
-							controller.abort(`超过 ${live.hardTimeoutMs}ms 硬上限`);
-						}, live.hardTimeoutMs);
-						timer.unref?.();
-					}
+					// 预算与 controller 在进入 job 之前就建好，范围校验也算在 timeoutMs 内。
+					const controller = callController;
 					job.updateProgress(`reviewing (${ids.join(', ')})`);
 					// 心跳：子智能体实测能跑 20 分钟以上，而中间没有任何输出，调用方只能靠猜。
 					// 定期把「谁还在跑 + 已用时」写进进度，至少能看出它没死。
 					const pending = new Set(ids);
 					const startedAt = Date.now();
-					const heartbeat = setInterval(() => {
+					let heartbeat;
+					heartbeat = setInterval(() => {
 						if (pending.size === 0) return;
 						const seconds = Math.round((Date.now() - startedAt) / 1000);
 						const elapsed = `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
@@ -467,6 +585,12 @@ export function apply(ctx, config) {
 					const done = (async () => {
 						try {
 							const changes = await collectChanges(ctx, live, target, cwd, controller.signal, { packet: needsPacket(reviewers) });
+
+							// 采集阶段撞上调用级/全局上限时，git 可能已经中止、summary 看起来是空的；
+							// 必须先按“已中止”收口，不能落进下面「没有改动」的成功出口。
+							if (controller.signal.aborted) {
+								throw new Error(`review 已中止：${String(controller.signal.reason ?? 'cancelled')}`);
+							}
 
 							// 没有改动就不要打扰评审者：多花几分钟、还容易换来一堆幻觉 findings。
 							const gitBroke = changes.gitFailed === true;
@@ -551,9 +675,14 @@ export function apply(ctx, config) {
 							// 又会误命中（给出「调高 timeoutMs」的错误建议）。
 							for (const outcome of outcomes) {
 								if (outcome.timedOut === undefined) continue;
-								if (reviewers.find((reviewer) => reviewer.id === outcome.id)?.kind !== 'subagent') continue;
-								const where = outcome.timedOut === 'job' ? '被本次评审的墙钟上限（`hardTimeoutMs`）中止' : '被该评审者的 `timeoutMs` 中止';
-								reportNotes.push(`${outcome.id}：子智能体在大范围上${where}。这个 diff 建议只用 CLI 评审者，或调高对应的超时设置；也可以先用 \`base\`/\`commit\` 缩小范围。`);
+								const kind = reviewers.find((reviewer) => reviewer.id === outcome.id)?.kind;
+								if (outcome.timedOut === 'call') {
+									reportNotes.push(`${outcome.id}：被本次调用的 \`timeoutMs\` 中止。可以调大 timeoutMs，或先用 \`base\`/\`commit\` 缩小范围。`);
+								} else if (outcome.timedOut === 'job') {
+									reportNotes.push(`${outcome.id}：被本次评审的墙钟上限（\`hardTimeoutMs\`）中止。可以调大 hardTimeoutMs，或先用 \`base\`/\`commit\` 缩小范围。`);
+								} else if (kind === 'subagent') {
+									reportNotes.push(`${outcome.id}：子智能体在大范围上被该评审者的 \`timeoutMs\` 中止。这个 diff 建议只用 CLI 评审者，或调高对应的超时设置；也可以先用 \`base\`/\`commit\` 缩小范围。`);
+								}
 							}
 							if (argvTruncated.length > 0) {
 								reportNotes.push(
@@ -569,10 +698,23 @@ export function apply(ctx, config) {
 							const truncation = truncateText(draft, live.maxResultChars);
 							let shown = draft;
 							if (truncation.truncated) {
-								// 只有截断时才需要把全文留在盘上：结果里给出了路径，不能删。
+								// 只有截断时才需要把全文留在盘上。写入失败时绝不能继续给一个
+								// “完整报告：路径”的承诺——用不含 reportPath 的 draft 截断并明说失败。
 								const full = composeReport({ reviewers, outcomes, changes, mode, target, reportPath, truncated: true, notes: reportNotes, warnings: live.warnings });
-								await writeFile(reportPath, full, 'utf8').catch(() => undefined);
-								shown = `${truncateText(full, live.maxResultChars).text}\n\n[报告已截断；完整报告：${reportPath}]`;
+								let saved = false;
+								let saveError;
+								try {
+									await __internals.writeReport(reportPath, full, 'utf8');
+									saved = true;
+								} catch (error) {
+									saveError = messageOf(error);
+								}
+								if (saved) {
+									shown = `${truncateText(full, live.maxResultChars).text}\n\n[报告已截断；完整报告：${reportPath}]`;
+								} else {
+									shown = `${truncation.text}\n\n[报告已截断；完整报告保存失败（${saveError ?? '未知错误'}）]`;
+									await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
+								}
 							} else {
 								// 全文已经在结果里，临时目录（各 CLI 的 --output-last-message 等）不再被引用。
 								await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
@@ -598,6 +740,8 @@ export function apply(ctx, config) {
 						done,
 						cancel: (reason) => {
 							if (timer !== undefined) clearTimeout(timer);
+							// 子智能体/CLI 的下游可能收得慢；取消时立刻停心跳，别继续对已取消的 job 写进度。
+							clearInterval(heartbeat);
 							if (!controller.signal.aborted) controller.abort(typeof reason === 'string' && reason.length > 0 ? reason : 'cancelled');
 						},
 					};

@@ -49,9 +49,10 @@ function defaultGitScript(cwd) {
 		{ argv: ['git', '-c', 'core.quotepath=false', 'diff', '--numstat', 'main'], stdout: '3\t1\tsrc/c.js\n' },
 		{ argv: ['git', '-c', 'core.quotepath=false', 'diff', '--stat', 'main'], stdout: ' src/c.js | 4 +++-\n' },
 		{ argv: ['git', '-c', 'core.quotepath=false', 'diff', '--no-color', '--find-renames', 'main'], stdout: 'diff --git a/src/c.js b/src/c.js\n@@ -1 +1 @@\n-x\n+y\n' },
-		{ argv: ['git', '-c', 'core.quotepath=false', 'show', '--numstat', '--format=', 'abc123'], stdout: '1\t1\tsrc/d.js\n' },
-		{ argv: ['git', '-c', 'core.quotepath=false', 'show', '--stat', '--format=%h %s', 'abc123'], stdout: 'abc123 fix: thing\n src/d.js | 2 +-\n' },
-		{ argv: ['git', '-c', 'core.quotepath=false', 'show', '--patch', '--no-color', '--format=medium', 'abc123'], stdout: 'commit abc123\n\ndiff --git a/src/d.js b/src/d.js\n@@ -1 +1 @@\n-p\n+q\n' },
+		{ argv: ['git', 'rev-list', '--parents', '-n', '1', 'abc123'], stdout: 'abc123 parent\n' },
+		{ argv: ['git', '-c', 'core.quotepath=false', 'show', '-m', '--first-parent', '--numstat', '--format=', 'abc123'], stdout: '1\t1\tsrc/d.js\n' },
+		{ argv: ['git', '-c', 'core.quotepath=false', 'show', '-m', '--first-parent', '--stat', '--format=%h %s', 'abc123'], stdout: 'abc123 fix: thing\n src/d.js | 2 +-\n' },
+		{ argv: ['git', '-c', 'core.quotepath=false', 'show', '-m', '--first-parent', '--patch', '--no-color', '--format=medium', 'abc123'], stdout: 'commit abc123\n\ndiff --git a/src/d.js b/src/d.js\n@@ -1 +1 @@\n-p\n+q\n' },
 	];
 }
 
@@ -315,7 +316,10 @@ console.log('\nB. 工具描述与参数校验');
 	const h = await loadPlugin({
 		plugin: {
 			agents: [{ preset: 'codex' }, { preset: 'claude' }],
-			modes: { deep: { strength: 'deep', description: '彻底评审' } },
+			modes: {
+				deep: { strength: 'deep', description: '彻底评审' },
+				claudeOnly: { strength: 'standard', reviewers: ['claude'] },
+			},
 		},
 	});
 	check('B 工具名是 review', h.definition.name === 'review', h.definition.name);
@@ -328,7 +332,8 @@ console.log('\nB. 工具描述与参数校验');
 	check('B 描述写明范围+关注点按评审者能力有条件放行', description.includes('可以和 `instructions` 同时给') && description.includes('脚注'), description.slice(-700));
 	// 旧文案把「写进 mode 的 prompt」当出路，但有范围时模式提示词同样被跳过——那是一条死路。
 	check('B 全 CLI 拒绝时不把 mode 提示词当出路', description.includes('写进 `mode` 的提示词同样会被跳过'), description.slice(-700));
-	check('B 描述说明 reviewers 只能从列表里选', description.includes('只能从上面列出的评审者里选'));
+	check('B 描述说明 reviewers 只能从运行期启用的列表里选', description.includes('只能从运行期启用的评审者里选'));
+	check('B 描述把评审者清单标成注册时快照', description.includes('注册时快照') && description.includes('doctor'));
 	check('B 描述说明默认立即返回 job id', description.includes('立即') && description.includes('job_output'));
 	{
 		const props = h.definition.parameters.properties;
@@ -337,7 +342,7 @@ console.log('\nB. 工具描述与参数校验');
 		check('B instructions 参数说明范围+关注点的条件与脚注', props.instructions.description.includes('脚注') && props.instructions.description.includes('subagent'), props.instructions.description);
 		check('B instructions 参数说明全 CLI 时直接报错', props.instructions.description.includes('只能留一个'), props.instructions.description);
 	}
-	check('B 参数含 reviewers/mode/base/commit/instructions/doctor', Object.keys(h.definition.parameters.properties).join(',') === 'reviewers,mode,base,commit,instructions,doctor');
+	check('B 参数含 reviewers/mode/base/commit/instructions/timeoutMs/doctor', Object.keys(h.definition.parameters.properties).join(',') === 'reviewers,mode,base,commit,instructions,timeoutMs,doctor');
 	// 描述里的可用性标注只认「含 / 的绝对路径」：本机事故是 patch 钉死的绝对路径被依赖重装
 	// 删掉，而描述仍宣告可用。裸名字走 PATH，不能在解析配置时 stat 成「当前目录下的文件不存在」。
 	{
@@ -347,6 +352,9 @@ console.log('\nB. 工具描述与参数校验');
 		check('B 裸名字不误报「不存在」', !bare.definition.description.includes('⚠️'), bare.definition.description);
 	}
 	check('B presentCall 是 terminal 卡片', h.definition.presentCall({ reviewers: ['codex'], base: 'main' }).title === 'review(codex) --base main');
+	check('B presentCall 对 doctor 不选评审者', h.definition.presentCall({ doctor: true }).title === 'review(doctor)', h.definition.presentCall({ doctor: true }).title);
+	check('B presentCall 使用模式指定的评审者', h.definition.presentCall({ mode: 'claudeOnly' }).title === 'review(claude) --uncommitted', h.definition.presentCall({ mode: 'claudeOnly' }).title);
+	check('B presentCall 未知评审者不抛错', typeof h.definition.presentCall({ reviewers: ['ghost'] }).title === 'string');
 	// 回归（codex 评审）：卡片标题与 job 标签曾各写一份拼装，job 标签加了 instructions、卡片
 	// 没加；而且只标「有没有」不足以区分两条不同的指令。
 	{
@@ -374,6 +382,11 @@ console.log('\nB. 工具描述与参数校验');
 	await rejects('B 拒绝 reviewers 非数组', () => run(h, { reviewers: 'codex' }));
 	await rejects('B 拒绝未知模式', () => run(h, { mode: 'ghost' }));
 	await rejects('B 拒绝未知评审者', () => run(h, { reviewers: ['ghost'] }));
+	await rejects('B 拒绝 timeoutMs=0', () => run(h, { timeoutMs: 0 }));
+	await rejects('B 拒绝负 timeoutMs', () => run(h, { timeoutMs: -1 }));
+	await rejects('B 拒绝小数 timeoutMs', () => run(h, { timeoutMs: 1.5 }));
+	await rejects('B 拒绝超上限 timeoutMs', () => run(h, { timeoutMs: 86_400_001 }));
+	await rejects('B 拒绝字符串 timeoutMs', () => run(h, { timeoutMs: '1000' }));
 }
 
 /* ────────────────────────────── C. CLI 评审者（codex 预设） ────────────────────────────── */
@@ -889,6 +902,21 @@ console.log('\nG5. 环境自检');
 	check('G5 doctor 不碰 git', !h.state.spawns.some((spec) => spec.argv[0] === 'git'), JSON.stringify(h.state.spawns.map((s) => s.argv.slice(0, 2))));
 }
 {
+	// 描述是注册时快照：doctor 必须把“快照 vs 当前配置”摊开，否则调用方又会拿旧清单做决定。
+	const h = await loadPlugin({
+		plugin: { agents: [{ preset: 'codex' }], modes: { quick: { strength: 'light' } } },
+		harness: { ...GIT, stdout: 'codex-cli 9.9.9\n', resolveExecutable: async (command) => (command.includes('/') ? command : `/fake/${command}`) },
+	});
+	const same = await run(h, { doctor: true });
+	check('G5 doctor 报告描述与当前配置一致', same.report.includes('与当前配置一致'), same.report.slice(0, 500));
+	check('G5 doctor 列出当前默认集合与模式', same.report.includes('当前默认评审者') && same.report.includes('当前默认模式'), same.report.slice(0, 500));
+	h.config.agents.push({ preset: 'claude' });
+	h.config.defaultMode = 'quick';
+	const changed = await run(h, { doctor: true });
+	check('G5 doctor 报告描述快照不一致', changed.report.includes('与当前配置不一致') && changed.report.includes('claude'), changed.report.slice(0, 600));
+	check('G5 doctor 指纹覆盖默认模式', changed.report.includes('当前默认模式：`quick`'), changed.report.slice(0, 600));
+}
+{
 	// 定位失败 + 子智能体 provider 已注册：失败要给处理办法，别只说「不行」。
 	const h = await loadPlugin({
 		plugin: {
@@ -1260,6 +1288,67 @@ console.log('\nH. 回归');
 		});
 		const reverseValue = await run(reverse, {});
 		check('H 评审者超时先发生时不被上游改写', reverseValue.report.includes('被该评审者的 `timeoutMs` 中止'), reverseValue.report.slice(-600));
+
+		// 调用级 timeoutMs：与 hardTimeoutMs 取最小正值，按实际生效的来源归因。
+		const callTimeout = await loadPlugin({ plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] }, harness: { ...GIT, services: hanging } });
+		const callValue = await run(callTimeout, { timeoutMs: 40 });
+		check('H 调用级 timeoutMs 按本次调用归因', callValue.report.includes('被本次调用的 `timeoutMs` 中止'), callValue.report.slice(-600));
+
+		const hardWins = await loadPlugin({ plugin: { hardTimeoutMs: 40, reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] }, harness: { ...GIT, services: hanging } });
+		const hardWinsValue = await run(hardWins, { timeoutMs: 200 });
+		check('H call > hard 时按 hardTimeoutMs 归因', hardWinsValue.report.includes('被本次评审的墙钟上限（`hardTimeoutMs`）中止'), hardWinsValue.report.slice(-600));
+
+		const callWins = await loadPlugin({ plugin: { hardTimeoutMs: 200, reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] }, harness: { ...GIT, services: hanging } });
+		const callWinsValue = await run(callWins, { timeoutMs: 40 });
+		check('H call < hard 时按调用级归因', callWinsValue.report.includes('被本次调用的 `timeoutMs` 中止'), callWinsValue.report.slice(-600));
+
+		const equalLimits = await loadPlugin({ plugin: { hardTimeoutMs: 40, reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] }, harness: { ...GIT, services: hanging } });
+		const equalValue = await run(equalLimits, { timeoutMs: 40 });
+		check('H call == hard 时归因为调用级', equalValue.report.includes('被本次调用的 `timeoutMs` 中止'), equalValue.report.slice(-600));
+
+		const reviewerWins = await loadPlugin({ plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn', timeoutMs: 20 }] }, harness: { ...GIT, services: hanging } });
+		const reviewerWinsValue = await run(reviewerWins, { timeoutMs: 200 });
+		check('H 评审者自身 timeoutMs 先到时不改写', reviewerWinsValue.report.includes('被该评审者的 `timeoutMs` 中止'), reviewerWinsValue.report.slice(-600));
+
+		// 采集阶段超时：git 还没返回就 abort，不能落进「未检测到需要评审的改动」的成功出口。
+		const collectAbort = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, spawnDelayMs: 60, report: '结论' } });
+		const collectValue = await run(collectAbort, { timeoutMs: 10 });
+		check('H 采集阶段超时不报没有改动', collectValue.report.includes('已中止') && !collectValue.report.includes('未检测到需要评审的改动'), collectValue.report.slice(0, 400));
+
+		// 范围校验也吃 timeoutMs：git 卡住时不能先等几分钟再报“分支不存在”。
+		const validation = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, spawnDelayMs: 60, report: '结论' } });
+		try {
+			await run(validation, { commit: 'abc123', timeoutMs: 10 });
+			check('H 范围校验受 timeoutMs 约束', false, '没有超时');
+		} catch (error) {
+			check('H 范围校验受 timeoutMs 约束', String(error.message).includes('已超时'), String(error.message));
+		}
+
+		// 用户先取消、定时器后到：不能把“取消”改写成“超时”。
+		const cancelRace = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }] }, harness: { ...GIT, spawnDelayMs: 60, report: '结论' } });
+		const cancelExec = defaultExec(cancelRace.cwd);
+		const cancelController = new AbortController();
+		cancelExec.signal = cancelController.signal;
+		const cancelTimer = setTimeout(() => cancelController.abort('user cancelled'), 5);
+		try {
+			await run(cancelRace, { commit: 'abc123', timeoutMs: 20 }, cancelExec);
+			check('H 范围校验取消不被改写成超时', false, '没有抛错');
+		} catch (error) {
+			check('H 范围校验取消不被改写成超时', String(error.message).includes('已取消') && !String(error.message).includes('已超时'), String(error.message));
+		} finally {
+			clearTimeout(cancelTimer);
+		}
+
+		// 截断报告写失败：不能继续给一个“完整报告：路径”的承诺。
+		const saveFails = await loadPlugin({ plugin: { agents: [{ preset: 'codex' }], maxResultChars: 80 }, harness: { ...GIT, report: '长'.repeat(300) } });
+		const originalWrite = saveFails.mod.__internals.writeReport;
+		saveFails.mod.__internals.writeReport = async () => { throw new Error('disk full'); };
+		try {
+			const failedSave = await run(saveFails, {});
+			check('H 报告写入失败不承诺完整路径', failedSave.report.includes('完整报告保存失败') && !failedSave.report.includes('完整报告：'), failedSave.report.slice(-400));
+		} finally {
+			saveFails.mod.__internals.writeReport = originalWrite;
+		}
 	} finally {
 		clearInterval(keepAlive);
 	}
@@ -1429,7 +1518,7 @@ console.log('\nJ. 浏览器半边');
  * 工厂只要 react 与 primitives 两个 external，所以替身足够跑通 apply、纯逻辑与渲染树。
  */
 async function loadClientBundle(options = {}) {
-	const captured = { registrations: [], slots: [], locales: [], effects: [], disposers: [], models: [], injects: [], scope: undefined, entry: undefined, served: undefined };
+	const captured = { registrations: [], slots: [], locales: [], effects: [], disposers: [], models: [], injects: [], scope: undefined, entry: undefined, served: undefined, remoteEvents: {}, catalogCalls: 0 };
 	const asArray = (value) => (value === undefined || value === null || value === false ? [] : Array.isArray(value) ? value.flat() : [value]);
 	// React 会把 children 同时放进 props.children；桩件也照做，组件内部才能读到 props.children。
 	const react = {
@@ -1566,7 +1655,7 @@ async function loadClientBundle(options = {}) {
 		subscribe: () => () => {},
 		mutate: async () => true,
 	};
-	const catalogResult = options.catalog ?? {
+	let catalogResult = options.catalog ?? {
 		ok: true,
 		value: {
 			groups: [
@@ -1576,7 +1665,20 @@ async function loadClientBundle(options = {}) {
 			failures: [],
 		},
 	};
-	const remoteSession = { modelCatalog: async () => catalogResult };
+	captured.setCatalog = (next) => (catalogResult = next);
+	const remoteSession = {
+		modelCatalog: async () => {
+			captured.catalogCalls += 1;
+			return catalogResult;
+		},
+	};
+	// 宿主事件总线：设置保存 / 适配器更新都会从这里推过来。插件应当只做静默刷新。
+	const remoteBus = {
+		$on: (event, handler) => {
+			(captured.remoteEvents[event] ??= []).push(handler);
+			return () => {};
+		},
+	};
 	const ctx = {
 		locale: { bind: () => (key) => key, register: (ns, dictionaries) => (captured.locales.push({ ns, dictionaries }), () => {}) },
 		configForms: {
@@ -1598,12 +1700,12 @@ async function loadClientBundle(options = {}) {
 		},
 		// deferRemote 模拟「插件 apply 时 remote.session 还没注册」：先存下依赖声明，
 		// 等服务真的出现后由用例手动回调。
-		get: options.deferRemote === true ? () => undefined : (service) => (service === 'remote.session' ? remoteSession : undefined),
+		get: options.deferRemote === true ? () => undefined : (service) => (service === 'remote.session' ? remoteSession : service === 'remote' ? remoteBus : undefined),
 		inject: (deps, callback) => {
 			captured.injects.push(deps);
 			const fire = (scope) => callback(scope);
 			if (options.deferRemote === true) captured.remoteInject = fire;
-			else fire({ get: (service) => (service === 'remote.session' ? remoteSession : undefined) });
+			else fire({ get: (service) => (service === 'remote.session' ? remoteSession : service === 'remote' ? remoteBus : undefined) });
 			return () => {};
 		},
 	};
@@ -1654,6 +1756,8 @@ function findAll(node, predicate) {
 		// 与官方 settings-form 同一套设计变量与度量，亮暗主题自动跟随
 		check('J 样式沿用宿主设计变量', ['--dsw-alias-label-primary', '--dsw-alias-label-tertiary', '--dsw-alias-border-l2', '--dsw-radius-md', '--dsw-focus-ring-width'].every((token) => I.STYLES.includes(token)));
 		check('J 样式与官方度量一致', I.STYLES.includes('font-size: 13px') && I.STYLES.includes('font-size: 12px') && I.STYLES.includes('0.5px solid'));
+		// 首次编辑时会出现「已覆盖 / 恢复默认」，行高若跟着涨，页面会往下跳。
+		check('J 覆盖标记出现不改变行高', /\.dsh-review-label-row\s*\{[^}]*min-height:\s*28px/.test(I.STYLES));
 		// 折叠头是原生 button：必须清掉浏览器默认样式，否则一眼就是「没排版」
 		check('J 折叠头清掉了默认按钮样式', I.STYLES.includes('.dsh-review-group-head {') && /appearance: none/.test(I.STYLES) && /border: 0/.test(I.STYLES));
 		check('J 列表去掉了默认项目符号与缩进', /list-style: none/.test(I.STYLES) && /padding: 0/.test(I.STYLES));
@@ -1904,15 +2008,48 @@ function findAll(node, predicate) {
 	check('J 目录更新换了新快照对象', face.hooks.reviewCatalog.getSnapshot() !== idleSnapshot, 'same object');
 }
 
+{
+	// 自动保存会发 settings/document-updated。目录刷新必须是静默的：否则每次落盘都会闪一下
+	// 「正在读取可用模型…」，页面高度跟着变，正在输入的人会看到内容往下跳。
+	const { mod, ctx, captured } = await loadClientBundle({});
+	mod.apply(ctx);
+	const face = captured.registrations[0].options.inject();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	check('J 后台刷新前目录已就绪', face.hooks.reviewCatalog.getSnapshot().status === 'ready', face.hooks.reviewCatalog.getSnapshot().status);
+	const statuses = [];
+	const unsubscribe = face.hooks.reviewCatalog.subscribe(() => statuses.push(face.hooks.reviewCatalog.getSnapshot().status));
+	const callsBefore = captured.catalogCalls;
+	captured.setCatalog({ ok: true, value: { groups: [{ id: 'new-provider', name: '新 provider', models: [{ id: 'm1' }] }], failures: [] } });
+	// 一次保存通常两条失效事件都到：只应合并成一次刷新。
+	for (const handler of captured.remoteEvents['settings/document-updated']) handler('review', 8);
+	for (const handler of captured.remoteEvents['llm/adapters-updated']) handler();
+	check('J 后台刷新不会立刻切 loading', face.hooks.reviewCatalog.getSnapshot().status === 'ready', face.hooks.reviewCatalog.getSnapshot().status);
+	await new Promise((resolve) => setTimeout(resolve, 330));
+	unsubscribe();
+	check('J 后台刷新合并成一次请求', captured.catalogCalls === callsBefore + 1, `${callsBefore} → ${captured.catalogCalls}`);
+	check('J 后台刷新不经过 loading', !statuses.includes('loading'), statuses.join(','));
+	const refreshed = face.hooks.reviewCatalog.getSnapshot();
+	check('J 后台刷新更新目录且保持 ready', refreshed.status === 'ready' && refreshed.groups[0]?.id === 'new-provider', JSON.stringify(refreshed.groups));
+	// 手动「重新读取」仍要有 loading 反馈。
+	face.reloadCatalog();
+	check('J 手动重读会显示 loading', face.hooks.reviewCatalog.getSnapshot().status === 'loading', face.hooks.reviewCatalog.getSnapshot().status);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	check('J 手动重读完成后回到 ready', face.hooks.reviewCatalog.getSnapshot().status === 'ready', face.hooks.reviewCatalog.getSnapshot().status);
+}
+
 /* ────────────────────────────── J2. 自动保存 ────────────────────────────── */
 
 console.log('\nJ2. 自动保存');
+
+/** 默认防抖：要足够长，让人连续输入时算一轮；测试用例再改小到 5ms。 */
+const DEFAULT_AUTO_DELAY = 1500;
 
 {
 	// 编辑后防抖落盘；状态从 pending → saving → saved。
 	const { mod, ctx, captured } = await loadClientBundle({ saveFailures: 0 });
 	const I = mod.__internals;
-	I.AUTO.delayMs = 5; // 测试里不必等 500ms
+	check('J2 默认防抖不再半秒一次', I.AUTO.delayMs === DEFAULT_AUTO_DELAY, String(I.AUTO.delayMs));
+	I.AUTO.delayMs = 5; // 测试里不必等真实防抖
 	mod.apply(ctx);
 	const model = captured.models[0];
 	const face = captured.registrations[0].options.inject();
@@ -1923,7 +2060,7 @@ console.log('\nJ2. 自动保存');
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	check('J2 防抖结束后写了一次', model.saveCalls === 1, String(model.saveCalls));
 	check('J2 写完状态是 saved', face.hooks.reviewAutosave.getSnapshot().status === 'saved' && model.dirty === false, face.hooks.reviewAutosave.getSnapshot().status);
-	I.AUTO.delayMs = 500; // 复原
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY; // 复原
 }
 
 {
@@ -1939,7 +2076,7 @@ console.log('\nJ2. 自动保存');
 	face.edit('language', 'en');
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	check('J2 连续编辑只写一次', model.saveCalls === 1, String(model.saveCalls));
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -1961,7 +2098,7 @@ console.log('\nJ2. 自动保存');
 	face.edit('waitMs', '1000');
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	check('J2 修正后自动补写', model.saveCalls === 1 && face.hooks.reviewAutosave.getSnapshot().status === 'saved', `${model.saveCalls}/${face.hooks.reviewAutosave.getSnapshot().status}`);
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -1977,7 +2114,7 @@ console.log('\nJ2. 自动保存');
 	check('J2 冲突后重试了一次', model.saveCalls === 2, String(model.saveCalls));
 	check('J2 冲突恢复靠「丢弃 + 重新暂存」', model.discardCalls === 1, String(model.discardCalls));
 	check('J2 恢复后状态回到 saved', face.hooks.reviewAutosave.getSnapshot().status === 'saved', face.hooks.reviewAutosave.getSnapshot().status);
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -1996,7 +2133,7 @@ console.log('\nJ2. 自动保存');
 	face.save();
 	await new Promise((resolve) => setTimeout(resolve, 10));
 	check('J2 立即保存可手动重试', model.saveCalls >= 3, String(model.saveCalls));
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2013,7 +2150,7 @@ console.log('\nJ2. 自动保存');
 	await new Promise((resolve) => setTimeout(resolve, 40));
 	check('J2 离开页面前先落盘', model.saveCalls === 1, String(model.saveCalls));
 	check('J2 之后才丢弃草稿', model.discardCalls === 1 && model.dirty === false);
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2033,7 +2170,7 @@ console.log('\nJ2. 自动保存');
 	check('J2 离开时不丢在途编辑（写了第二轮）', model.saveCalls >= 2, String(model.saveCalls));
 	check('J2 离开时草稿已写完才丢弃', model.dirty === false && model.discardCalls === 1, `${model.dirty}/${model.discardCalls}`);
 	check('J2 最终状态是 saved', face.hooks.reviewAutosave.getSnapshot().status === 'saved', face.hooks.reviewAutosave.getSnapshot().status);
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2049,7 +2186,7 @@ console.log('\nJ2. 自动保存');
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	check('J2 只读部署不写盘', model.saveCalls === 0, String(model.saveCalls));
 	check('J2 只读部署状态为 idle', face.hooks.reviewAutosave.getSnapshot().status === 'idle', face.hooks.reviewAutosave.getSnapshot().status);
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2066,7 +2203,7 @@ console.log('\nJ2. 自动保存');
 	await new Promise((resolve) => setTimeout(resolve, 120));
 	check('J2 保存期间的编辑会再写一轮', model.saveCalls >= 2, String(model.saveCalls));
 	check('J2 最终状态是 saved（没有挂着的草稿）', face.hooks.reviewAutosave.getSnapshot().status === 'saved' && model.dirty === false, `${face.hooks.reviewAutosave.getSnapshot().status}/${model.dirty}`);
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2084,7 +2221,7 @@ console.log('\nJ2. 自动保存');
 	face.save();
 	await new Promise((resolve) => setTimeout(resolve, 10));
 	check('J2 抛异常后仍可手动再试', model.saveCalls >= 3, String(model.saveCalls));
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2102,7 +2239,7 @@ console.log('\nJ2. 自动保存');
 	// 关键：重放的必须是用户敲进去的值（'en'），不是取回草稿后读到的旧值（假宿主里是 'zh'）
 	check('J2 冲突恢复重放的是用户的编辑值', replayed.every((entry) => entry === 'language=en'), JSON.stringify(replayed));
 	check('J2 冲突恢复没有重放整表', model.editLog.length <= 3, String(model.editLog.length));
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2120,7 +2257,7 @@ console.log('\nJ2. 自动保存');
 	}
 	await new Promise((resolve) => setTimeout(resolve, 80));
 	check('J2 卸载后不再写入', model.saveCalls === 0, String(model.saveCalls));
-	I.AUTO.delayMs = 500;
+	I.AUTO.delayMs = DEFAULT_AUTO_DELAY;
 }
 
 {
@@ -2147,6 +2284,36 @@ console.log('\nJ2. 自动保存');
 	// 保存按钮变成「立即保存」兜底
 	const labels = findAll(element, (node) => node.type === 'SettingsForm')[0].props.labels;
 	check('J2 保存按钮改成「立即保存」', labels.save === 'saveNow', labels.save);
+}
+
+{
+	// 保存期间不禁用输入框：禁用的 <input> 会在落盘瞬间失焦，正在敲的字会断，
+	// 页面也会因为焦点/布局变化跳一下。官方模型在 saving 时会清 staged，
+	// 那几条编辑由 autosave 的 pending 缓冲接住（上面的用例已覆盖）。
+	const { mod, ctx, captured } = await loadClientBundle({});
+	mod.apply(ctx);
+	const model = captured.models[0];
+	const face = captured.registrations[0].options.inject();
+	const page = captured.registrations[0].render;
+	const render = (shell) => {
+		const view = { shell: { ...model.shell(), ...shell }, fields: Object.fromEntries(model.specs.map((entry) => [entry.field, model.field(entry.field)])) };
+		return page({
+			view: 'page',
+			t: (key) => key,
+			...face,
+			useReviewConfigForm: (selector) => selector(view),
+			useReviewCatalog: (selector) => selector({ status: 'ready', groups: [] }),
+			useReviewAutosave: (selector) => selector({ status: 'idle' }),
+		});
+	};
+	const saving = render({ saving: true });
+	const savingInput = findAll(saving, (node) => node.type === 'Input')[0];
+	check('J2 保存中普通字段仍可编辑', savingInput?.props?.disabled === false, String(savingInput?.props?.disabled));
+	const savingAdd = findAll(saving, (node) => node.type === 'Button').find((node) => node.props.children === 'addReviewer');
+	check('J2 保存中结构化编辑按钮仍可用', savingAdd?.props?.disabled === false, String(savingAdd?.props?.disabled));
+	const readOnly = render({ writable: false, saving: false });
+	const readOnlyInput = findAll(readOnly, (node) => node.type === 'Input')[0];
+	check('J2 只读部署仍然禁用字段', readOnlyInput?.props?.disabled === true, String(readOnlyInput?.props?.disabled));
 }
 
 /* ────────────────────────────── K. GUI 配置的宿主半边 ────────────────────────────── */
@@ -2479,6 +2646,155 @@ console.log('\nN. 评审状态条');
 	check('N 子智能体会话不按改动隐藏', I.reviewStatusVisible({ ...session, subagent: { address: { kind: 'subagent' } } }, noChanges) === true);
 	check('N 没有改动能力时不按改动隐藏', I.reviewStatusVisible(session, { ...noChanges, changes: { ...noChanges.changes, enabled: false } }) === true);
 	check('N 还没有 turn 时显示', I.reviewStatusVisible(session, { ...noChanges, changes: { enabled: true, currentTurn: 0, inTurn: false, changesTurn: 0 } }) === true);
+}
+
+/* ────────────────────────────── O. 真实 git 回归 ────────────────────────────── */
+
+console.log('\nO. 真实 git 回归');
+{
+	const { collectChanges } = await import(new URL('./lib/changes.js', import.meta.url).href);
+	const { resolveSettings } = await import(new URL('./lib/settings.js', import.meta.url).href);
+	const { formatPathList } = await import(new URL('./lib/format.js', import.meta.url).href);
+	const { composeReport } = await import(new URL('./lib/report.js', import.meta.url).href);
+
+	const gitCtx = {
+		subprocess: {
+			spawn(spec) {
+				const out = spawnSync(spec.argv[0], spec.argv.slice(1), { cwd: spec.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+				const reader = (text) => ({ readFrom: () => ({ text: text ?? '', lossy: false }) });
+				return {
+					collected: { stdout: reader(out.stdout), stderr: reader(out.stderr) },
+					done: Promise.resolve({ exitCode: out.status ?? 1, signal: null }),
+					terminate() {},
+				};
+			},
+		},
+	};
+	const settings = resolveSettings({});
+
+	const git = (cwd, ...args) => {
+		const out = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+		if (out.status !== 0) throw new Error(`git ${args.join(' ')} 失败：${out.stderr}`);
+		return out.stdout.trim();
+	};
+	const makeRepo = () => {
+		const repo = mkdtempSync(join(tmpdir(), 'dsh-review-git-'));
+		git(repo, 'init', '-q', '-b', 'master');
+		git(repo, 'config', 'user.email', 'selftest@example.com');
+		git(repo, 'config', 'user.name', 'selftest');
+		writeFileSync(join(repo, 'f'), 'base\n');
+		git(repo, 'add', 'f');
+		git(repo, 'commit', '-qm', 'base');
+		git(repo, 'checkout', '-qb', 'side');
+		writeFileSync(join(repo, 's'), 'side\n');
+		git(repo, 'add', 's');
+		git(repo, 'commit', '-qm', 'side');
+		git(repo, 'checkout', '-q', 'master');
+		writeFileSync(join(repo, 'm'), 'main\n');
+		git(repo, 'add', 'm');
+		git(repo, 'commit', '-qm', 'main');
+		git(repo, 'merge', '-q', '--no-ff', 'side', '-m', 'merge');
+		return repo;
+	};
+
+	// merge：numstat 与 patch 必须给出同一组第一父改动；正文不能只有提交说明。
+	{
+		const repo = makeRepo();
+		try {
+			const merge = git(repo, 'rev-parse', 'HEAD');
+			const changes = await collectChanges(gitCtx, settings, { base: '', commit: merge, instructions: '' }, repo, undefined, { packet: true });
+			check('O merge 的 numstat 与 packet 一致', changes.summary.files === 1 && changes.summary.fileNames.includes('s'), JSON.stringify(changes.summary));
+			check('O merge 的 packet 有第一父 hunk', changes.packet.text.includes('@@') && changes.packet.text.includes('+side'), changes.packet.text.slice(0, 500));
+			check('O merge 报告说明第一父语义', changes.notes.some((note) => note.includes('merge commit') && note.includes('第一父')), changes.notes.join(' | '));
+
+			// commit 范围里出现未跟踪文件时，报告要写出文件名，而不是只说“1 个”。
+			writeFileSync(join(repo, 'new-file.js'), 'export const n = 1;\n');
+			const scoped = await collectChanges(gitCtx, settings, { base: '', commit: merge, instructions: '' }, repo, undefined, { packet: true });
+			check('O commit 范围的未跟踪文件写出名字', scoped.notes.some((note) => note.includes('new-file.js') && note.includes('不属于本次范围')), scoped.notes.join(' | '));
+		} finally {
+			rmSync(repo, { recursive: true, force: true });
+		}
+	}
+
+	// 未跟踪符号链接：仓库内、仓库外、断链都不能被跟随读取。
+	{
+		const repo = makeRepo();
+		const outside = mkdtempSync(join(tmpdir(), 'dsh-review-outside-'));
+		try {
+			const secret = join(outside, 'secret.txt');
+			writeFileSync(secret, 'DO_NOT_READ_THIS_SECRET\n');
+			writeFileSync(join(repo, 'regular.js'), 'export const ok = 1;\n');
+			symlinkSync(secret, join(repo, 'external-link'));
+			symlinkSync(join(repo, 'f'), join(repo, 'internal-link'));
+			symlinkSync(join(repo, 'missing'), join(repo, 'broken-link'));
+
+			const withPacket = await collectChanges(gitCtx, settings, { base: '', commit: '', instructions: '' }, repo, undefined, { packet: true });
+			check('O 符号链接内容不进 packet', !withPacket.packet.text.includes('DO_NOT_READ_THIS_SECRET'), withPacket.packet.text.slice(0, 500));
+			check('O 符号链接列入跳过说明', withPacket.notes.some((note) => note.includes('3 个未跟踪符号链接未跟随')), withPacket.notes.join(' | '));
+			check('O 符号链接保留在文件计数里', withPacket.summary.fileNames.includes('external-link') && withPacket.summary.fileNames.includes('internal-link') && withPacket.summary.fileNames.includes('broken-link'), JSON.stringify(withPacket.summary.fileNames));
+
+			const noPacket = await collectChanges(gitCtx, settings, { base: '', commit: '', instructions: '' }, repo, undefined, { packet: false });
+			check('O packet:false 也说明符号链接未跟随', noPacket.notes.some((note) => note.includes('3 个未跟踪符号链接未跟随')), noPacket.notes.join(' | '));
+			check('O 符号链接不增加行数', noPacket.summary.additions === 1, JSON.stringify(noPacket.summary));
+		} finally {
+			rmSync(repo, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	}
+
+	// 纯符号链接、零行：也必须有跳过说明，不能看起来像“没有内容”。
+	{
+		const repo = makeRepo();
+		const outside = mkdtempSync(join(tmpdir(), 'dsh-review-outside-'));
+		try {
+			const secret = join(outside, 'secret.txt');
+			writeFileSync(secret, 'SECRET_ONLY_LINK\n');
+			symlinkSync(secret, join(repo, 'only-link'));
+			const result = await collectChanges(gitCtx, settings, { base: '', commit: '', instructions: '' }, repo, undefined, { packet: false });
+			check('O 纯符号链接零行也说明未跟随', result.summary.additions === 0 && result.notes.some((note) => note.includes('1 个未跟踪符号链接未跟随')), result.notes.join(' | '));
+		} finally {
+			rmSync(repo, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	}
+
+	// 统计预算耗尽后，后面才出现的符号链接仍然要被分类、被说明。
+	{
+		const repo = makeRepo();
+		const outside = mkdtempSync(join(tmpdir(), 'dsh-review-outside-'));
+		try {
+			for (let i = 0; i < 17; i += 1) writeFileSync(join(repo, `a${String(i).padStart(2, '0')}.txt`), 'x'.repeat(250 * 1024));
+			writeFileSync(join(outside, 'secret.txt'), 'SECRET_AFTER_BUDGET\n');
+			symlinkSync(join(outside, 'secret.txt'), join(repo, 'zz-link'));
+			const result = await collectChanges(gitCtx, settings, { base: '', commit: '', instructions: '' }, repo, undefined, { packet: false });
+			check('O 预算耗尽后仍报符号链接', result.notes.some((note) => note.includes('1 个未跟踪符号链接未跟随')), result.notes.join(' | '));
+		} finally {
+			rmSync(repo, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	}
+
+	// 报告头的文件预览：去重、限量、控制字符与反引号不外泄。
+	{
+		const preview = formatPathList(['a.js', 'a.js', 'b`\nname', '😀'.repeat(200), ...Array.from({ length: 20 }, (_, i) => `f${i}.js`)], { maxItems: 5, maxTotal: 120, maxItem: 20 });
+		check('O 文件预览去重', preview.includes('`a.js`') && !preview.includes('`a.js`、`a.js`'), preview);
+		check('O 文件预览剔除控制字符与反引号', !preview.includes('\n') && preview.includes('b??name'), preview);
+		check('O 文件预览限量', preview.includes('等 23 个'), preview);
+		const tiny = formatPathList(['x'.repeat(200)], { maxTotal: 20 });
+		check('O 文件预览严格不超预算', tiny.length <= 20, `${tiny.length}:${tiny}`);
+		check('O 零预算返回空串', formatPathList(['x'], { maxTotal: 0 }) === '', formatPathList(['x'], { maxTotal: 0 }));
+		const bidi = formatPathList(['a\u061Cb\u200Ec\u200Fd']);
+		check('O 文件预览剔除双向控制字符', !/[\u061C\u200E\u200F]/.test(bidi) && bidi.includes('a?b?c?d'), bidi);
+		const report = composeReport({
+			reviewers: [{ id: 'codex' }],
+			outcomes: [{ id: 'codex', label: 'Codex', kind: 'cli', status: 'completed', text: '未发现问题', elapsedMs: 1 }],
+			changes: { summary: { files: 2, additions: 1, deletions: 0, fileNames: ['a.js', 'a.js', 'b.js'] } },
+			target: {},
+			notes: [],
+			warnings: [],
+		});
+		check('O 报告头有范围内文件预览', report.includes('范围内变更文件预览') && report.includes('`a.js`、`b.js`'), report.slice(0, 400));
+	}
 }
 
 console.log(`\n${passes} 项通过，${failures} 项失败`);

@@ -18,7 +18,7 @@
 - **多个评审者，一份报告。** 并行跑；每个评审者一节，按你勾选的顺序排列。
 - **评审模式。** 强度与提示词起个名字（`quick`、`balanced`、`deep`……）配一次就能复用，
   不必每次重写评审要求。
-- **在 GUI 里配置，而且自动保存。** 勾选要用的评审者，其余都收在「高级配置」里；停止输入约半秒
+- **在 GUI 里配置，而且自动保存。** 勾选要用的评审者，其余都收在「高级配置」里；停止输入约一秒半
   后自动落盘，顶部会显示保存状态，最下面仍留一个「立即保存」按钮作手动重试。
 - **评审状态一眼可见。** 对话开始后，对话与输入框之间会出现一条很轻的状态：还没评审、第几轮正在跑、
   已经评审过几轮、用了哪些评审者；点开是每一轮的时间、范围与结果。对话为空时不出现，当前这一轮
@@ -50,13 +50,15 @@ review({ mode: "deep" })                          // 深度模式：多个评审
 review({ base: "main" })                          // 工作区相对某个分支的改动
 review({ commit: "abc1234" })                     // 某个提交引入的改动
 review({ instructions: "只看并发与错误处理" })
+review({ timeoutMs: 600000 })                     // 本次最多跑 10 分钟
 ```
 
 评审要跑几分钟，所以调用默认**立即**把 job id 交回（不等）：用 `job_output` 读结论、
 `job_kill` 终止，或者就等着——跑完会自动通知。
 
 评审者是**显式启用**的：一个都没启用时，不带 `reviewers` 的调用会直接报错，而不是
-悄悄把能用的都跑一遍。
+悄悄把能用的都跑一遍。`timeoutMs` 是单次调用的墙钟上限，与配置里的 `hardTimeoutMs` 取较小值；
+两者都设时报告按实际生效的那个归因。
 
 ## 评审状态
 
@@ -129,6 +131,29 @@ DSH 0.2.1 起，persona 与工具限制不再由子智能体启动请求传入�
 
 这里刻意**没有**「把 diff 丢给一个裸模型」这种类型：能自己打开仓库的评审者，比只看到手头材料的
 更有价值。
+
+### 让 codex 也收「范围 + 关注点」
+
+codex 原生 `exec review` 的范围开关与 PROMPT 互斥，所以默认 codex 评审者只能二选一。如果确实
+需要带着关注点评审一个已提交范围，可以再加一个走 `codex exec` 的自定义评审者——它有 diff 包，
+`instructions` 会进提示词：
+
+```yaml
+reviewers:
+  - id: codex-diff
+    kind: cli
+    preset: custom
+    executable: codex
+    label: Codex (diff)
+    command: ["{exe}", "exec", "--sandbox", "read-only", "{model}", "{extra}", "{prompt}"]
+    promptVia: argv
+    needsPacket: true
+    promptReplacesRange: false
+```
+
+它走 `codex exec`，不是原生 `exec review`，评审口径与原生路径不同；只在需要「范围 + 关注点」时用。
+`command` 里不要写 `{promptArg}`（否则会被当成 PROMPT 与范围互斥），也不要写 `{range}`（`codex exec`
+不认 `--base` / `--commit`，范围由插件收集的 diff 包提供）。
 
 ```yaml
 - id: review
@@ -213,6 +238,9 @@ config:
   「什么都没评」的批次。
 - 报告骨架（标题、脚注、错误信息）目前固定中文；`language` 只影响评审者自己的指令。
 - 被截断的报告留在 `$TMPDIR/dsh-review-*/report.md`；未截断的运行会自己清理。
+- merge 提交按**第一父提交**的 diff 评审（`git show -m --first-parent`）：这是“这次 merge 落到当前分支”的口径，不是 combined diff。
+- 未跟踪的符号链接不会被跟随读取，避免把仓库外的内容交给评审者；报告只列名字并说明“未跟随”。
+- 报告头的“范围内变更文件预览”来自 git 文件列表，只说明范围，不代表评审者已逐一审查。
 - 工具描述里的评审者列表是**注册时**的快照：宿主不会因为 profile 的依赖变化而重载插件代码
   （实测 `patchReload: live` 只重载 patch 层），所以描述可能滞后于磁盘现状。要准的当前状态
   用 `review({ doctor: true })`。同一原因，改完插件代码需要重启宿主才生效。

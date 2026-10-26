@@ -1,6 +1,6 @@
 {
   "name": "dsh-review",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "private": true,
   "description": "DSH host plugin: a generic `review` tool that fans code review out to CLI coding agents and DSH subagents",
   "type": "module",

@@ -39,8 +39,13 @@ window.__ModuleLoader__.load({
 		/** 这个 bundle 的包名：`plugins.bundle.config` / `plugins.row.config` 的 key 用它拼。 */
 		const PKG = 'dsh-review';
 
-		/** 自动保存的防抖时长（测试可改小，避免等 500ms）。 */
-		const AUTO = { delayMs: 500 };
+		/**
+		 * 自动保存的防抖时长（测试可改小）。
+		 *
+		 * 这个页面里既有开关，也有要连续敲字的输入框；500ms 太短，人在词与词之间停一下就会
+		 * 落一次盘。1.5s 让「连续输入」始终算一轮，停手后才写一次。
+		 */
+		const AUTO = { delayMs: 1500 };
 
 		const KINDS = ['cli', 'subagent'];
 		const CLI_PRESETS = ['codex', 'claude', 'gemini', 'opencode', 'cursor', 'custom'];
@@ -1621,6 +1626,9 @@ h5.dsh-review-subgroup-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 覆盖后会多出「已覆盖」标记与「恢复默认」按钮，它们比纯文字高。
+     预留这段高度，免得第一次编辑时整页内容跟着往下挪。 */
+  min-height: 28px;
 }
 .dsh-review-label {
   flex: 1;
@@ -2166,7 +2174,10 @@ h5.dsh-review-subgroup-title {
 			const autosave = typeof props.useReviewAutosave === 'function' ? props.useReviewAutosave((snapshot) => snapshot) : props.autosave;
 			if (props.view === 'summary') return t('summary');
 			const actions = { edit: props.edit, resetField: props.resetField, save: props.save, discard: props.discard };
-			const disabled = !view.shell.writable || view.shell.saving;
+			// 保存期间**不**禁用字段：被禁用的 `<input>` 会立刻失焦，正在敲的字会断掉，
+			// 页面也会因为焦点丢失、状态行重排而跳一下。输入框保持可编辑，保存期间到达的
+			// 编辑由 autosave 的 pending 缓冲接住，落盘结束后再补写一轮。
+			const disabled = !view.shell.writable;
 			const reviewersText = view.fields.reviewers?.text ?? '';
 			const modesText = view.fields.modes?.text ?? '';
 			const renderField = (field) =>
@@ -2587,14 +2598,26 @@ h5.dsh-review-subgroup-title {
 				}
 			};
 			let loading = false;
-			const loadCatalog = async (scope) => {
+			/** 后台刷新定时器：一次保存可能触发多条失效事件，合并成一次。 */
+			let refreshTimer;
+			/**
+			 * 拉一次模型目录。
+			 *
+			 * `silent` 用于后台失效（设置保存、适配器更新）：保留旧的下拉选项，不把状态切到
+			 * loading/error。否则每次自动保存都会让「正在读取可用模型…」闪现一下，页面高度
+			 * 跟着变，正在输入的人会看到内容往下跳。
+			 */
+			const loadCatalog = async (scope, options = {}) => {
+				const silent = options.silent === true;
 				const remote = pickRemote(scope === undefined ? ctx : scope);
 				if (loading) return false;
 				// 服务还没就绪：保持 idle，等 `remote.session` 注册后由 inject / 事件再试。
 				if (typeof remote?.modelCatalog !== 'function') return false;
 				loading = true;
-				catalog = { ...catalog, status: 'loading' };
-				notify();
+				if (!silent) {
+					catalog = { ...catalog, status: 'loading' };
+					notify();
+				}
 				try {
 					const response = await remote.modelCatalog();
 					if (response?.ok === true) {
@@ -2603,16 +2626,32 @@ h5.dsh-review-subgroup-title {
 							groups: Array.isArray(response.value?.groups) ? response.value.groups : [],
 							failures: Array.isArray(response.value?.failures) ? response.value.failures : [],
 						};
-					} else {
+					} else if (!silent) {
 						catalog = { ...catalog, status: 'error' };
 					}
 				} catch {
-					catalog = { ...catalog, status: 'error' };
+					if (!silent) catalog = { ...catalog, status: 'error' };
 				}
 				loading = false;
 				notify();
 				return catalog.status === 'ready';
 			};
+			/** 把短时间内到达的多条失效事件合并成一次静默刷新。 */
+			const scheduleCatalogRefresh = () => {
+				if (refreshTimer !== undefined) return;
+				refreshTimer = setTimeout(() => {
+					refreshTimer = undefined;
+					void loadCatalog(undefined, { silent: true });
+				}, 250);
+				refreshTimer?.unref?.();
+			};
+			ctx.effect(
+				() => () => {
+					if (refreshTimer !== undefined) clearTimeout(refreshTimer);
+					refreshTimer = undefined;
+				},
+				'dsh-review: model catalog refresh',
+			);
 			/**
 			 * 首次加载的时机。
 			 *
@@ -2651,7 +2690,8 @@ h5.dsh-review-subgroup-title {
 			for (const event of ['llm/adapters-updated', 'settings/document-updated']) {
 				try {
 					const bus = ctx.get?.('remote') ?? ctx.remote;
-					bus?.$on?.(event, () => loadCatalog());
+					// 后台失效走静默刷新：不闪 loading、不收起已有选项。
+					bus?.$on?.(event, scheduleCatalogRefresh);
 				} catch {
 					/* 事件通道不可用就用一次性加载 */
 				}
