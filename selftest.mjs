@@ -526,6 +526,60 @@ console.log('\nE. 子智能体评审者');
 	check('E 传了 provider 与 model', subagentCalls[0].request.agentOptions.provider === 'bailian' && subagentCalls[0].request.agentOptions.model === 'deepseek-v4.1-flash');
 	check('E 传了 parent 与 agentPreset', subagentCalls[0].request.parent.id === 'agent-1' && subagentCalls[0].request.agentPreset === 'review-readonly');
 	check('E 提示词里有评审包', subagentCalls[0].request.prompt[0].text.includes('评审任务'));
+	// 0.2.2 起宿主读的是摊平字段；缺了就是线上那个 `spec.parent.id` 崩溃。
+	check('E 摊平形状带 parent/prompt/agentOptions/agentPreset', subagentCalls[0].parent?.id === 'agent-1' && subagentCalls[0].prompt?.[0]?.text.includes('评审任务') && subagentCalls[0].agentOptions?.provider === 'bailian' && subagentCalls[0].agentPreset === 'review-readonly', JSON.stringify({ parent: subagentCalls[0].parent?.id, hasPrompt: Array.isArray(subagentCalls[0].prompt), agentOptions: subagentCalls[0].agentOptions, agentPreset: subagentCalls[0].agentPreset }));
+}
+{
+	// 回归（实测 dsh-review 2.2.0 + DSH 0.2.2）：宿主把启动请求摊平到 spec 顶层，
+	// `startActivation` 一开始就读 `spec.parent.id`。以前只传嵌套 request，于是真实
+	// 宿主抛 `Cannot read properties of undefined (reading 'id')`，两个评审者全失败。
+	const h = await loadPlugin({
+		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] },
+		harness: {
+			...GIT,
+			services: {
+				subagents: {
+					getProvider: () => ({ name: 'spawn' }),
+					async startActivation(spec) {
+						// 与 0.2.2 的 SubagentService.startActivation 同序：先读 parent.id。
+						const parentId = spec.parent.id;
+						if (!Array.isArray(spec.prompt) || spec.prompt.length === 0) throw new Error('0.2.2 需要摊平的 prompt');
+						return {
+							childId: 'child-flat',
+							result: Promise.resolve({ output: [{ type: 'text', text: `摊平形状：${parentId}` }], stopReason: 'completed' }),
+							dispose: async () => {},
+						};
+					},
+				},
+			},
+		},
+	});
+	const value = await run(h, {});
+	check('E 0.2.2 摊平形状能启动子智能体', value.report.includes('摊平形状：agent-1'), value.report.slice(0, 500));
+}
+{
+	// 0.2.1 只读 `spec.request`：嵌套那份必须继续保留，不能为了 0.2.2 把它删掉。
+	const h = await loadPlugin({
+		plugin: { reviewers: [{ id: 'deep', kind: 'subagent', provider: 'spawn' }] },
+		harness: {
+			...GIT,
+			services: {
+				subagents: {
+					getProvider: () => ({ name: 'spawn' }),
+					async startActivation(spec) {
+						const parentId = spec.request.parent.id;
+						return {
+							childId: 'child-nested',
+							result: Promise.resolve({ output: [{ type: 'text', text: `嵌套形状：${parentId}` }], stopReason: 'completed' }),
+							dispose: async () => {},
+						};
+					},
+				},
+			},
+		},
+	});
+	const value = await run(h, {});
+	check('E 0.2.1 嵌套形状仍能启动子智能体', value.report.includes('嵌套形状：agent-1'), value.report.slice(0, 500));
 }
 {
 	// 0.1.x 只有 start()：要么明确报版本，要么让人看到 `start is not a function`。
